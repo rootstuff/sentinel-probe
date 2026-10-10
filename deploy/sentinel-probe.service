@@ -1,0 +1,22 @@
+# Installed by scripts/node-install.sh, left disabled: the probe has no
+# long-running mode yet. It is here so the loop/report mode lands on a box
+# that is already wired for it.
+[Unit]
+Description=Sentinel Go probe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=probe
+Group=probe
+ExecStart=/usr/local/bin/sentinel-probe serve
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
