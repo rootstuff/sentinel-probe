@@ -47,6 +47,11 @@ type Options struct {
 	Body            string
 	// AllowPrivate disables the public-address guard. Local benchmarking only.
 	AllowPrivate bool
+	// HTTP1Only turns HTTP/2 off, to tell a TLS fingerprint block from an
+	// HTTP/2 fingerprint block.
+	HTTP1Only bool
+	// BareHeaders sends only the User-Agent, to rule the header set out.
+	BareHeaders bool
 }
 
 // Result is the row the Laravel side would store, field names included.
@@ -139,6 +144,9 @@ func Run(ctx context.Context, o Options) Result {
 
 	jar, _ := cookiejar.New(nil)
 	headers := defaultHeaders(o)
+	if o.BareHeaders {
+		headers = map[string]string{"User-Agent": UserAgent}
+	}
 	method, body, current := o.Method, o.Body, o.URL
 	connectTimeout := ConnectTimeout(o.Timeout)
 
@@ -165,7 +173,7 @@ func Run(ctx context.Context, o Options) Result {
 			hopTimeout = max(time.Second, remaining)
 		}
 
-		resp, ph, tr, hopCancel, err := doHop(ctx, hopTimeout, connectTimeout, method, current, ip, headers, body, jar)
+		resp, ph, tr, hopCancel, err := doHop(ctx, hopTimeout, connectTimeout, method, current, ip, headers, body, jar, o.HTTP1Only)
 		res.TCPMs, res.TLSMs, res.TTFBMs = int(ph.tcp.Milliseconds()), int(ph.tls.Milliseconds()), int(ph.ttfb.Milliseconds())
 		if err != nil {
 			hopCancel()
@@ -225,7 +233,7 @@ func Run(ctx context.Context, o Options) Result {
 	}
 }
 
-func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method, rawURL string, ip netip.Addr, headers map[string]string, body string, jar http.CookieJar) (*http.Response, phases, *http.Transport, context.CancelFunc, error) {
+func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method, rawURL string, ip netip.Addr, headers map[string]string, body string, jar http.CookieJar, http1Only bool) (*http.Response, phases, *http.Transport, context.CancelFunc, error) {
 	hctx, cancel := context.WithTimeout(ctx, hopTimeout)
 
 	var connStart, connDone, tlsStart, tlsDone, firstByte time.Time
@@ -252,9 +260,12 @@ func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method
 			}
 			return dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
 		},
-		ForceAttemptHTTP2:   true,
+		ForceAttemptHTTP2:   !http1Only,
 		TLSHandshakeTimeout: connectTimeout,
 		MaxIdleConns:        1,
+	}
+	if http1Only {
+		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	}
 	client := &http.Client{
 		Transport: tr,

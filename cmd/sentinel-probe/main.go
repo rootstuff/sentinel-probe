@@ -68,6 +68,8 @@ func runCheck(args []string) {
 	body := fs.String("body", "", "request body for POST/PUT/PATCH")
 	noRedirects := fs.Bool("no-redirects", false, "do not follow redirects")
 	allowPrivate := fs.Bool("allow-private", false, "skip the public-address guard (local testing only)")
+	http1 := fs.Bool("http1", false, "HTTP/1.1 only (fingerprint diagnosis)")
+	bare := fs.Bool("bare-headers", false, "send only the User-Agent (fingerprint diagnosis)")
 	headers := headerFlags{}
 	fs.Var(headers, "header", "extra header k=v (repeatable)")
 	fs.Parse(args)
@@ -86,6 +88,8 @@ func runCheck(args []string) {
 		Headers:         headers,
 		Body:            *body,
 		AllowPrivate:    *allowPrivate,
+		HTTP1Only:       *http1,
+		BareHeaders:     *bare,
 	})
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
