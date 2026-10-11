@@ -13,7 +13,11 @@ import (
 
 // Monitor is one row of the manifest: the request a check makes.
 type Monitor struct {
-	ID                  int64             `json:"id"`
+	ID int64 `json:"id"`
+	// Type is http (default), ping or port.
+	Type string `json:"type"`
+	// Port for port monitors.
+	Port                *int              `json:"port"`
 	URL                 string            `json:"url"`
 	IntervalSeconds     int               `json:"interval_seconds"`
 	Timeout             int               `json:"timeout"`

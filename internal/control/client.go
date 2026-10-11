@@ -86,12 +86,13 @@ var ErrStorageUnavailable = errors.New("control plane storage unavailable")
 func (c *Client) PostResults(ctx context.Context, items []spool.Item) (*Ack, error) {
 	type wire struct {
 		MonitorID int64           `json:"monitor_id"`
+		Type      string          `json:"type,omitempty"`
 		CheckedAt string          `json:"checked_at"`
 		Result    json.RawMessage `json:"result"`
 	}
 	results := make([]wire, len(items))
 	for i, it := range items {
-		results[i] = wire{it.MonitorID, it.CheckedAt.UTC().Format(time.RFC3339), it.Result}
+		results[i] = wire{it.MonitorID, it.Type, it.CheckedAt.UTC().Format(time.RFC3339), it.Result}
 	}
 	body, _ := json.Marshal(map[string]any{"results": results})
 	req, err := c.request(ctx, "/api/probe/results", body)

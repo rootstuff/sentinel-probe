@@ -34,6 +34,8 @@ done
 ssh "$USER_@$IP" REGION="$REGION" URL="$URL" bash -s <<'REMOTE'
 set -euo pipefail
 id probe >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin probe
+# Ping checks run the system ping, as the PHP edges do.
+command -v ping >/dev/null 2>&1 || (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iputils-ping >/dev/null)
 install -m 0755 /tmp/sentinel-probe-linux-amd64 /usr/local/bin/sentinel-probe
 install -m 0644 /tmp/sentinel-probe.service /etc/systemd/system/sentinel-probe.service
 install -m 0755 /tmp/node-diag.sh /usr/local/bin/sentinel-probe-diag

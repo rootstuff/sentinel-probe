@@ -17,6 +17,7 @@ import (
 type Item struct {
 	Seq       uint64          `json:"seq"`
 	MonitorID int64           `json:"monitor_id"`
+	Type      string          `json:"type,omitempty"`
 	CheckedAt time.Time       `json:"checked_at"`
 	Result    json.RawMessage `json:"result"`
 	Attempts  int             `json:"attempts,omitempty"`
@@ -80,6 +81,11 @@ func (s *Spool) load() error {
 
 // Add appends a result and makes it durable before returning.
 func (s *Spool) Add(monitorID int64, checkedAt time.Time, result any) error {
+	return s.AddTyped(monitorID, "", checkedAt, result)
+}
+
+// AddTyped appends a result of a given monitor type (http, ping, port).
+func (s *Spool) AddTyped(monitorID int64, typ string, checkedAt time.Time, result any) error {
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return err
@@ -87,7 +93,7 @@ func (s *Spool) Add(monitorID int64, checkedAt time.Time, result any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seq++
-	it := Item{Seq: s.seq, MonitorID: monitorID, CheckedAt: checkedAt, Result: raw}
+	it := Item{Seq: s.seq, MonitorID: monitorID, Type: typ, CheckedAt: checkedAt, Result: raw}
 	line, _ := json.Marshal(it)
 	if _, err := s.file.Write(append(line, '\n')); err != nil {
 		return err

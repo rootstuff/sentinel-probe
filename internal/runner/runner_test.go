@@ -37,7 +37,9 @@ func newFakeControl(t *testing.T, target string) *fakeControl {
 			"region":       "test",
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
 			"monitors": []map[string]any{{
-				"id": 42, "url": target + "/ok", "interval_seconds": 30, "timeout": 5, "method": "GET",
+				"id": 7, "type": "port", "url": "port.invalid", "port": 1, "interval_seconds": 30,
+			}, {
+				"id": 42, "type": "http", "url": target + "/ok", "interval_seconds": 30, "timeout": 5, "method": "GET",
 				"headers": map[string]string{"X-Custom": "1"}, "body": nil, "accepted_status_codes": []string{"2xx"},
 				"follow_redirects": true, "auth": map[string]string{"username": "u", "password": "p"},
 				"check_types": []string{"http", "json"}, "needs_body": true, "last_checked_at": nil,
@@ -136,14 +138,14 @@ func TestEndToEnd(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
 
-	waitFor(t, 5*time.Second, func() bool { return f.postedCount() >= 1 && f.syncCalls.Load() >= 2 })
+	waitFor(t, 8*time.Second, func() bool { return f.postedCount() >= 2 && f.syncCalls.Load() >= 2 })
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 
-	if n := f.postedCount(); n != 1 {
-		t.Errorf("one check in a 30s interval expected, posted %d", n)
+	if n := f.postedCount(); n != 2 {
+		t.Errorf("one check per monitor in a 30s interval expected, posted %d", n)
 	}
 	if r.spool.Len() != 0 {
 		t.Errorf("spool should be drained, has %d", r.spool.Len())
@@ -160,9 +162,25 @@ func TestEndToEnd(t *testing.T) {
 	if len(f.etags) < 2 || f.etags[1] != `"v1"` {
 		t.Errorf("second sync should carry the ETag, got %v", f.etags)
 	}
-	item := f.posted[0][0]
-	if item["monitor_id"].(float64) != 42 {
-		t.Errorf("monitor id %v", item["monitor_id"])
+	var item, portItem map[string]any
+	for _, batch := range f.posted {
+		for _, it := range batch {
+			switch it["monitor_id"].(float64) {
+			case 42:
+				item = it
+			case 7:
+				portItem = it
+			}
+		}
+	}
+	if item == nil || portItem == nil {
+		t.Fatalf("expected both monitors posted: %v", f.posted)
+	}
+	if portItem["type"] != "port" || portItem["result"].(map[string]any)["status"] != "offline" {
+		t.Errorf("port result: %v", portItem)
+	}
+	if item["type"] != "http" {
+		t.Errorf("http result should carry its type: %v", item)
 	}
 	if _, err := time.Parse(time.RFC3339, item["checked_at"].(string)); err != nil {
 		t.Errorf("checked_at %v", item["checked_at"])
@@ -204,7 +222,7 @@ func TestOutageSpoolsAndReplays(t *testing.T) {
 	// before the first sync.
 	f.down.Store(false)
 	r2 := newTestRunner(t, f, dir)
-	if r2.manifest == nil || len(r2.manifest.Monitors) != 1 {
+	if r2.manifest == nil || len(r2.manifest.Monitors) != 2 {
 		t.Fatal("cached manifest not loaded on restart")
 	}
 	ctx2, cancel2 := context.WithCancel(context.Background())

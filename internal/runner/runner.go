@@ -23,6 +23,8 @@ import (
 	"github.com/rootstuff/sentinel-probe/internal/check"
 	"github.com/rootstuff/sentinel-probe/internal/control"
 	"github.com/rootstuff/sentinel-probe/internal/manifest"
+	"github.com/rootstuff/sentinel-probe/internal/ping"
+	"github.com/rootstuff/sentinel-probe/internal/port"
 	"github.com/rootstuff/sentinel-probe/internal/robots"
 	"github.com/rootstuff/sentinel-probe/internal/spool"
 )
@@ -294,15 +296,30 @@ func (r *Runner) execute(ctx context.Context, m manifest.Monitor) {
 	r.checksMin.Add(1)
 
 	var result any
-	if !r.robots.Allowed(context.Background(), m.URL) {
-		// As MonitorCheckService does: a robots-blocked target reads as
-		// online with no request made.
-		result = map[string]any{"status": "online", "response_time": 0, "status_code": nil, "error": nil, "robots_txt_blocked": true}
-	} else {
-		result = check.Run(context.Background(), r.options(m))
+	typ := m.Type
+	if typ == "" {
+		typ = "http"
+	}
+	switch typ {
+	case "ping":
+		result = ping.Run(context.Background(), m.URL)
+	case "port":
+		p := 0
+		if m.Port != nil {
+			p = *m.Port
+		}
+		result = port.Run(context.Background(), m.URL, p)
+	default:
+		if !r.robots.Allowed(context.Background(), m.URL) {
+			// As MonitorCheckService does: a robots-blocked target reads as
+			// online with no request made.
+			result = map[string]any{"status": "online", "response_time": 0, "status_code": nil, "error": nil, "robots_txt_blocked": true}
+		} else {
+			result = check.Run(context.Background(), r.options(m))
+		}
 	}
 	checkedAt := time.Now()
-	if err := r.spool.Add(m.ID, checkedAt, result); err != nil {
+	if err := r.spool.AddTyped(m.ID, typ, checkedAt, result); err != nil {
 		r.log.Error("result could not be spooled", "monitor_id", m.ID, "error", err)
 		return
 	}
