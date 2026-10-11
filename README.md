@@ -28,10 +28,12 @@ host rejected when any of its addresses is non-public.
 
 ## Known deltas
 
-- The probe speaks HTTP/1.1 and presents an OpenSSL-shaped TLS handshake (uTLS).
-  PHP uses curl with HTTP/2. Found on the London node: Akamai's bot manager refused
-  Go's stock TLS fingerprint, then refused Go's HTTP/2 fingerprint, from a
-  datacenter address, while curl passed. One request per connection makes h2 moot.
+- The probe speaks HTTP/1.1, writes its request by hand in the PHP edge's header
+  order, and presents an OpenSSL-shaped TLS handshake via uTLS (`-hello curl`
+  gives curl's exact hello, `-hello go` Go's stock one). PHP uses curl with
+  HTTP/2. The reasoning and the London measurements are in `internal/check/hop.go`.
+- Cloudflare verifies SentinelBot by the published IP list. A probe address must be
+  on it before it checks Cloudflare-fronted customers; no handshake substitutes.
 
 - Response bodies are capped at 10 MB. PHP reads everything.
 - `Accept-Encoding` offers gzip only (Go handles it transparently). PHP also offers deflate.

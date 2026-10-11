@@ -72,7 +72,7 @@ func runCheck(args []string) {
 	http2 := fs.Bool("http2", false, "offer HTTP/2 (off by default, see Options.HTTP2)")
 	bare := fs.Bool("bare-headers", false, "send only the User-Agent (fingerprint diagnosis)")
 	printBody := fs.Bool("print-body", false, "write the response body to stderr")
-	hello := fs.String("hello", "curl", "TLS ClientHello to present: curl (default), safe, go")
+	hello := fs.String("hello", "safe", "TLS ClientHello to present: safe (default), curl, go")
 	headers := headerFlags{}
 	fs.Var(headers, "header", "extra header k=v (repeatable)")
 	fs.Parse(args)

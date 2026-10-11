@@ -14,19 +14,29 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// Why the handshake is done by hand: Akamai's bot manager (and others) score
-// the TLS ClientHello per address. Go's stock crypto/tls hello was refused
-// by www.microsoft.com from a Linode address while curl on the same box was
-// let through, and an "OpenSSL-like" hello was bucketed and blocked after a
-// burst while curl's exact hello was not. So the probe presents curl's hello
-// byte for byte (captured from Ubuntu 24.04's curl 8.5 / OpenSSL 3.0 through
-// a fingerprint echo service), the same handshake the PHP edges have shown
-// under the SentinelBot user agent for a year.
+// Why the handshake is done by hand, and which hello is the default.
 //
-// That hello advertises things Go cannot complete: DHE suites, the x448 and
-// FFDHE groups, encrypt-then-MAC, a few legacy signature schemes. A server
-// that picks one of them makes the handshake fail, so connect() retries the
-// hop once with safeHello, which only lists what Go supports.
+// Bot managers score the TLS ClientHello per address. Measured from a Linode
+// address at a monitor's cadence (one request every few seconds, the
+// London grid of 2026-10-10):
+//
+//   - safeHello (OpenSSL-shaped, only what Go completes): 200 on every site,
+//     Akamai (www.microsoft.com) and five Cloudflare-fronted customers.
+//   - curlHello (Ubuntu curl 8.5 / OpenSSL 3.0 byte for byte): 200 on Akamai,
+//     403 on the Cloudflare sites, exactly like real curl from the same box.
+//     Cloudflare verifies SentinelBot by the published IP list, so from an
+//     unlisted address a curl handshake claiming to be the bot is challenged,
+//     while an unfamiliar handshake passes on reputation alone.
+//   - Go's stock hello also passed at cadence; its earlier refusals were
+//     per-(address, fingerprint) penalties earned by burst benchmarks, which
+//     is why they followed whichever hello had been bursting.
+//
+// So safeHello is the default: it passes everywhere measured, and it never
+// offers a suite, group or signature scheme Go cannot finish. curlHello
+// stays for diagnosis (-hello curl), with a one-shot fallback to safeHello
+// when a server picks DHE, x448 or FFDHE from it. Whatever the hello, a new
+// probe address must be on the published /bot IP list before it checks
+// Cloudflare-fronted customers.
 func curlHello(http1Only bool) *utls.ClientHelloSpec {
 	alpn := []string{"h2", "http/1.1"}
 	if http1Only {
@@ -77,8 +87,7 @@ func curlHello(http1Only bool) *utls.ClientHelloSpec {
 	}
 }
 
-// safeHello lists only what Go can complete. Used when a server picks
-// something from curlHello that Go cannot finish.
+// safeHello is the default hello: OpenSSL's shape, only what Go can complete.
 func safeHello(http1Only bool) *utls.ClientHelloSpec {
 	alpn := []string{"h2", "http/1.1"}
 	if http1Only {
@@ -173,11 +182,13 @@ func connect(ctx context.Context, u *url.URL, ip netip.Addr, connectTimeout time
 		uconn, err2 = handshake(ctx, raw, u.Hostname(), safeHello(http1Only))
 	case "go":
 		uconn, err2 = handshakeStock(ctx, raw, u.Hostname(), http1Only)
-	default:
+	case "curl":
 		uconn, err2 = handshake(ctx, raw, u.Hostname(), curlHello(http1Only))
+	default:
+		uconn, err2 = handshake(ctx, raw, u.Hostname(), safeHello(http1Only))
 	}
 	err = err2
-	if err != nil && hello != "safe" && hello != "go" && retryWithSafeHello(err) {
+	if err != nil && hello == "curl" && retryWithSafeHello(err) {
 		raw.Close()
 		raw, err = dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
 		if err != nil {

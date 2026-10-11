@@ -57,8 +57,9 @@ type Options struct {
 	BareHeaders bool
 	// BodySink, when set, receives the final response body (up to MaxBodyBytes).
 	BodySink io.Writer
-	// Hello picks the ClientHello: "curl" (default, curl/OpenSSL byte for
-	// byte), "safe" (only what Go completes) or "go" (stock crypto/tls).
+	// Hello picks the ClientHello: "safe" (default: OpenSSL-shaped, only what
+	// Go completes), "curl" (curl/OpenSSL byte for byte) or "go" (stock
+	// crypto/tls). See hop.go for why safe is the default.
 	Hello string
 }
 
