@@ -7,7 +7,6 @@ package check
 
 import (
 	"context"
-	stdtls "crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -26,8 +25,6 @@ import (
 
 	"github.com/rootstuff/sentinel-probe/internal/guard"
 )
-
-type stdTLSConn = stdtls.Conn
 
 const (
 	UserAgent    = "Mozilla/5.0 (compatible; SentinelBot/1.0; +https://sentinel.rootstuff.io/bot)"
@@ -118,23 +115,6 @@ func ConnectTimeout(timeout time.Duration) time.Duration {
 	return third
 }
 
-func defaultHeaders(o Options) map[string]string {
-	h := map[string]string{
-		"User-Agent":      UserAgent,
-		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-		"Accept-Language": "en-US,en;q=0.5",
-		"X-Region":        o.Region,
-		"Cache-Control":   "no-cache",
-		// Accept-Encoding is left to the transport: Go then decompresses gzip
-		// transparently, as Guzzle's decode_content does. PHP also offers
-		// deflate; nobody serves it any more.
-	}
-	for k, v := range o.Headers {
-		h[k] = v
-	}
-	return h
-}
-
 // Run performs the check. It never panics and never returns an error: a
 // failure is a Result with Status "offline" and Error set, as in PHP.
 func Run(ctx context.Context, o Options) Result {
@@ -152,10 +132,7 @@ func Run(ctx context.Context, o Options) Result {
 	defer cancel()
 
 	jar, _ := cookiejar.New(nil)
-	headers := defaultHeaders(o)
-	if o.BareHeaders {
-		headers = map[string]string{"User-Agent": UserAgent}
-	}
+	headers := orderedHeaders(o)
 	method, body, current := o.Method, o.Body, o.URL
 	connectTimeout := ConnectTimeout(o.Timeout)
 
@@ -197,7 +174,12 @@ func Run(ctx context.Context, o Options) Result {
 		if o.BodySink != nil {
 			sink = o.BodySink
 		}
-		n, readErr := io.Copy(sink, io.LimitReader(resp.Body, MaxBodyBytes))
+		decoded, decErr := decodeBody(resp)
+		var n int64
+		readErr := decErr
+		if decErr == nil {
+			n, readErr = io.Copy(sink, io.LimitReader(decoded, MaxBodyBytes))
+		}
 		resp.Body.Close()
 		closeHop()
 		hopCancel()
@@ -241,23 +223,37 @@ func Run(ctx context.Context, o Options) Result {
 
 		// Configured credentials belong to the original host only.
 		if !strings.EqualFold(next.Hostname(), u.Hostname()) {
-			delete(headers, "Authorization")
-			delete(headers, "Cookie")
+			headers = dropHeader(dropHeader(headers, "Authorization"), "Cookie")
 		}
 
 		current = next.String()
 	}
 }
 
-func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method string, u *url.URL, ip netip.Addr, headers map[string]string, body string, jar http.CookieJar, http1Only bool) (*http.Response, phases, func(), context.CancelFunc, error) {
+func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method string, u *url.URL, ip netip.Addr, headers []header, body string, jar http.CookieJar, http1Only bool) (*http.Response, phases, func(), context.CancelFunc, error) {
 	hctx, cancel := context.WithTimeout(ctx, hopTimeout)
 	noop := func() {}
 
 	hc, err := connect(hctx, u, ip, connectTimeout, http1Only)
 	if err != nil {
-		return nil, phases{}, noop, cancel, err
+		ph := phases{}
+		if hc != nil {
+			ph.tcp, ph.tls = hc.tcp, hc.tls
+		}
+		return nil, ph, noop, cancel, err
 	}
 	ph := phases{tcp: hc.tcp, tls: hc.tls, proto: hc.proto}
+
+	if hc.proto != "h2" {
+		resp, firstByte, err := roundTripH1(hctx, hc.conn, method, u, headers, body, jar)
+		if !firstByte.IsZero() {
+			ph.ttfb = max(0, firstByte.Sub(hc.ready))
+		}
+		if resp != nil {
+			ph.proto = resp.Proto
+		}
+		return resp, ph, hc.close, cancel, err
+	}
 
 	var firstByte time.Time
 	trace := &httptrace.ClientTrace{
@@ -280,8 +276,8 @@ func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method
 	if err != nil {
 		return nil, ph, hc.close, cancel, err
 	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
+	for _, h := range headers {
+		req.Header.Set(h.k, h.v)
 	}
 	if reader != nil && json.Valid([]byte(body)) {
 		req.Header.Set("Content-Type", "application/json")
@@ -330,6 +326,12 @@ func simplify(err error) string {
 		err = uerr.Err
 	}
 	msg := err.Error()
+	// net.OpError prefixes "read tcp 10.0.0.2:51234->1.2.3.4:443:", which
+	// leaks the probe's own address and buries the cause; keep the cause.
+	var operr *net.OpError
+	if errors.As(err, &operr) && operr.Err != nil {
+		msg = operr.Err.Error()
+	}
 
 	var certErr interface{ Error() string }
 	var unknownCA x509.UnknownAuthorityError
@@ -343,6 +345,8 @@ func simplify(err error) string {
 		return "SSL certificate error"
 	case strings.Contains(msg, "connection refused"):
 		return "Connection refused"
+	case strings.Contains(msg, "connection reset"):
+		return "Connection reset by peer"
 	case strings.Contains(msg, "no such host"):
 		return "DNS resolution failed"
 	case errors.As(err, &netErr) && netErr.Timeout() && strings.Contains(msg, "dial tcp"):

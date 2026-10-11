@@ -2,7 +2,6 @@ package check
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/http"
 	"net/netip"
@@ -79,6 +78,7 @@ func openSSLHello(http1Only bool) *utls.ClientHelloSpec {
 // hopConn is one connected, handshaken hop: a RoundTripper bound to a single
 // connection, plus the phases measured on the way there.
 type hopConn struct {
+	conn  net.Conn
 	rt    http.RoundTripper
 	close func()
 	ready time.Time
@@ -107,27 +107,28 @@ func connect(ctx context.Context, u *url.URL, ip netip.Addr, connectTimeout time
 	if err != nil {
 		return nil, err
 	}
-	hc := &hopConn{tcp: time.Since(t0)}
+	hc := &hopConn{conn: raw, tcp: time.Since(t0)}
 
 	if u.Scheme != "https" {
-		tr := &http.Transport{DialContext: once(raw)}
-		hc.rt, hc.close, hc.ready, hc.proto = tr, tr.CloseIdleConnections, time.Now(), "http/1.1"
+		hc.close, hc.ready, hc.proto = func() { raw.Close() }, time.Now(), "http/1.1"
 		return hc, nil
 	}
 
 	uconn := utls.UClient(raw, &utls.Config{ServerName: u.Hostname()}, utls.HelloCustom)
 	if err := uconn.ApplyPreset(openSSLHello(http1Only)); err != nil {
 		raw.Close()
-		return nil, err
+		return hc, err
 	}
 	t1 := time.Now()
 	if err := uconn.HandshakeContext(ctx); err != nil {
+		hc.tls = time.Since(t1)
 		raw.Close()
-		return nil, err
+		return hc, err
 	}
 	hc.tls = time.Since(t1)
 	hc.ready = time.Now()
 	hc.proto = uconn.ConnectionState().NegotiatedProtocol
+	hc.conn = uconn
 
 	if hc.proto == "h2" {
 		cc, err := (&http2.Transport{}).NewClientConn(uconn)
@@ -139,24 +140,7 @@ func connect(ctx context.Context, u *url.URL, ip netip.Addr, connectTimeout time
 		return hc, nil
 	}
 
-	tr := &http.Transport{
-		DialTLSContext: once(uconn),
-		// The handshake is done and the conn is not a *tls.Conn, so the
-		// transport must not try to negotiate HTTP/2 on top of it.
-		TLSNextProto: map[string]func(string, *stdTLSConn) http.RoundTripper{},
-	}
-	hc.rt, hc.close = tr, tr.CloseIdleConnections
+	// HTTP/1.1: the request is written by hand (see h1.go), no transport.
+	hc.close = func() { uconn.Close() }
 	return hc, nil
-}
-
-// once hands a pre-dialed connection to a transport exactly one time.
-func once(c net.Conn) func(context.Context, string, string) (net.Conn, error) {
-	used := false
-	return func(context.Context, string, string) (net.Conn, error) {
-		if used {
-			return nil, errors.New("connection already used")
-		}
-		used = true
-		return c, nil
-	}
 }
