@@ -19,7 +19,7 @@ echo "building linux/amd64"
 (cd "$ROOT" && mkdir -p dist && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/sentinel-probe-linux-amd64 ./cmd/sentinel-probe)
 
 echo "copying to $USER_@$IP"
-scp -q "$ROOT/dist/sentinel-probe-linux-amd64" "$ROOT/deploy/sentinel-probe.service" "$ROOT/scripts/node-diag.sh" "$USER_@$IP:/tmp/"
+scp -q "$ROOT/dist/sentinel-probe-linux-amd64" "$ROOT/deploy/sentinel-probe.service" "$ROOT/scripts/node-diag.sh" "$ROOT/scripts/node-cf.sh" "$USER_@$IP:/tmp/"
 for f in "$ROOT/urls/monitors.txt" "$ROOT/urls/bench.txt"; do
   scp -q "$f" "$USER_@$IP:/tmp/sentinel-probe-$(basename "$f")"
 done
@@ -30,6 +30,7 @@ id probe >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/
 install -m 0755 /tmp/sentinel-probe-linux-amd64 /usr/local/bin/sentinel-probe
 install -m 0644 /tmp/sentinel-probe.service /etc/systemd/system/sentinel-probe.service
 install -m 0755 /tmp/node-diag.sh /usr/local/bin/sentinel-probe-diag
+install -m 0755 /tmp/node-cf.sh /usr/local/bin/sentinel-probe-cf
 mkdir -p /opt/sentinel-probe
 [ -f /tmp/sentinel-probe-monitors.txt ] && mv /tmp/sentinel-probe-monitors.txt /opt/sentinel-probe/urls.txt
 [ -f /tmp/sentinel-probe-bench.txt ] && mv /tmp/sentinel-probe-bench.txt /opt/sentinel-probe/bench-urls.txt

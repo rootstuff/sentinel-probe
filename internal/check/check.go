@@ -57,6 +57,9 @@ type Options struct {
 	BareHeaders bool
 	// BodySink, when set, receives the final response body (up to MaxBodyBytes).
 	BodySink io.Writer
+	// Hello picks the ClientHello: "curl" (default, curl/OpenSSL byte for
+	// byte), "safe" (only what Go completes) or "go" (stock crypto/tls).
+	Hello string
 }
 
 // Result is the row the Laravel side would store, field names included.
@@ -159,7 +162,7 @@ func Run(ctx context.Context, o Options) Result {
 			hopTimeout = max(time.Second, remaining)
 		}
 
-		resp, ph, closeHop, hopCancel, err := doHop(ctx, hopTimeout, connectTimeout, method, u, ip, headers, body, jar, !o.HTTP2)
+		resp, ph, closeHop, hopCancel, err := doHop(ctx, hopTimeout, connectTimeout, method, u, ip, headers, body, jar, !o.HTTP2, o.Hello)
 		res.TCPMs, res.TLSMs, res.TTFBMs = int(ph.tcp.Milliseconds()), int(ph.tls.Milliseconds()), int(ph.ttfb.Milliseconds())
 		if ph.proto != "" {
 			res.Proto = ph.proto
@@ -230,11 +233,11 @@ func Run(ctx context.Context, o Options) Result {
 	}
 }
 
-func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method string, u *url.URL, ip netip.Addr, headers []header, body string, jar http.CookieJar, http1Only bool) (*http.Response, phases, func(), context.CancelFunc, error) {
+func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method string, u *url.URL, ip netip.Addr, headers []header, body string, jar http.CookieJar, http1Only bool, hello string) (*http.Response, phases, func(), context.CancelFunc, error) {
 	hctx, cancel := context.WithTimeout(ctx, hopTimeout)
 	noop := func() {}
 
-	hc, err := connect(hctx, u, ip, connectTimeout, http1Only)
+	hc, err := connect(hctx, u, ip, connectTimeout, http1Only, hello)
 	if err != nil {
 		ph := phases{}
 		if hc != nil {

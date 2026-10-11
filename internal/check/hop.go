@@ -142,7 +142,7 @@ type hopConn struct {
 // OpenSSL-shaped ClientHello when the scheme is https, and returns a
 // RoundTripper that uses exactly that connection: HTTP/2 when ALPN agreed
 // on it, HTTP/1.1 otherwise.
-func connect(ctx context.Context, u *url.URL, ip netip.Addr, connectTimeout time.Duration, http1Only bool) (*hopConn, error) {
+func connect(ctx context.Context, u *url.URL, ip netip.Addr, connectTimeout time.Duration, http1Only bool, hello string) (*hopConn, error) {
 	port := u.Port()
 	if port == "" {
 		if u.Scheme == "https" {
@@ -166,8 +166,18 @@ func connect(ctx context.Context, u *url.URL, ip netip.Addr, connectTimeout time
 	}
 
 	t1 := time.Now()
-	uconn, err := handshake(ctx, raw, u.Hostname(), curlHello(http1Only))
-	if err != nil && retryWithSafeHello(err) {
+	var uconn *utls.UConn
+	var err2 error
+	switch hello {
+	case "safe":
+		uconn, err2 = handshake(ctx, raw, u.Hostname(), safeHello(http1Only))
+	case "go":
+		uconn, err2 = handshakeStock(ctx, raw, u.Hostname(), http1Only)
+	default:
+		uconn, err2 = handshake(ctx, raw, u.Hostname(), curlHello(http1Only))
+	}
+	err = err2
+	if err != nil && hello != "safe" && hello != "go" && retryWithSafeHello(err) {
 		raw.Close()
 		raw, err = dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
 		if err != nil {
@@ -230,4 +240,17 @@ func retryWithSafeHello(err error) bool {
 		}
 	}
 	return true
+}
+
+// handshakeStock is Go's own crypto/tls hello, kept for A/B diagnosis only.
+func handshakeStock(ctx context.Context, raw net.Conn, serverName string, http1Only bool) (*utls.UConn, error) {
+	alpn := []string{"h2", "http/1.1"}
+	if http1Only {
+		alpn = []string{"http/1.1"}
+	}
+	uconn := utls.UClient(raw, &utls.Config{ServerName: serverName, NextProtos: alpn}, utls.HelloGolang)
+	if err := uconn.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	return uconn, nil
 }
