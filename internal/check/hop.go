@@ -60,12 +60,11 @@ func curlHello(http1Only bool) *utls.ClientHelloSpec {
 			&utls.UtlsExtendedMasterSecretExtension{},
 			&utls.GenericExtension{Id: 49}, // post_handshake_auth
 			&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{
-				// OpenSSL 3.0's default list, in its order.
+				// Ubuntu 24.04 curl/OpenSSL 3.0, in its order, read off the echo service.
 				utls.ECDSAWithP256AndSHA256, utls.ECDSAWithP384AndSHA384, utls.ECDSAWithP521AndSHA512,
 				utls.Ed25519, 0x0808, // ed448
-				0x081a, 0x081b, 0x081c, // ecdsa_brainpool*_tls13
-				utls.PSSWithSHA256, utls.PSSWithSHA384, utls.PSSWithSHA512, // rsa_pss_rsae_*
-				0x0809, 0x080a, 0x080b, // rsa_pss_pss_*
+				0x0809, 0x080a, 0x080b, // rsa_pss_pss_sha256/384/512
+				utls.PSSWithSHA256, utls.PSSWithSHA384, utls.PSSWithSHA512, // rsa_pss_rsae_sha256/384/512
 				utls.PKCS1WithSHA256, utls.PKCS1WithSHA384, utls.PKCS1WithSHA512,
 				0x0303, 0x0301, 0x0302, // ecdsa_sha224, rsa_sha224, dsa_sha224
 				0x0402, 0x0502, 0x0602, // dsa_sha256, dsa_sha384, dsa_sha512
