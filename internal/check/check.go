@@ -7,7 +7,7 @@ package check
 
 import (
 	"context"
-	"crypto/tls"
+	stdtls "crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -26,6 +26,8 @@ import (
 
 	"github.com/rootstuff/sentinel-probe/internal/guard"
 )
+
+type stdTLSConn = stdtls.Conn
 
 const (
 	UserAgent    = "Mozilla/5.0 (compatible; SentinelBot/1.0; +https://sentinel.rootstuff.io/bot)"
@@ -52,6 +54,8 @@ type Options struct {
 	HTTP1Only bool
 	// BareHeaders sends only the User-Agent, to rule the header set out.
 	BareHeaders bool
+	// BodySink, when set, receives the final response body (up to MaxBodyBytes).
+	BodySink io.Writer
 }
 
 // Result is the row the Laravel side would store, field names included.
@@ -73,6 +77,7 @@ type Result struct {
 
 type phases struct {
 	tcp, tls, ttfb time.Duration
+	proto          string
 }
 
 func (o Options) withDefaults() Options {
@@ -173,19 +178,26 @@ func Run(ctx context.Context, o Options) Result {
 			hopTimeout = max(time.Second, remaining)
 		}
 
-		resp, ph, tr, hopCancel, err := doHop(ctx, hopTimeout, connectTimeout, method, current, ip, headers, body, jar, o.HTTP1Only)
+		resp, ph, closeHop, hopCancel, err := doHop(ctx, hopTimeout, connectTimeout, method, u, ip, headers, body, jar, o.HTTP1Only)
 		res.TCPMs, res.TLSMs, res.TTFBMs = int(ph.tcp.Milliseconds()), int(ph.tls.Milliseconds()), int(ph.ttfb.Milliseconds())
+		if ph.proto != "" {
+			res.Proto = ph.proto
+		}
 		if err != nil {
+			closeHop()
 			hopCancel()
 			return fail(simplify(err))
 		}
 
-		n, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, MaxBodyBytes))
+		var sink io.Writer = io.Discard
+		if o.BodySink != nil {
+			sink = o.BodySink
+		}
+		n, readErr := io.Copy(sink, io.LimitReader(resp.Body, MaxBodyBytes))
 		resp.Body.Close()
-		tr.CloseIdleConnections()
+		closeHop()
 		hopCancel()
 		res.BodyBytes = n
-		res.Proto = resp.Proto
 		if readErr != nil {
 			return fail(simplify(readErr))
 		}
@@ -233,42 +245,23 @@ func Run(ctx context.Context, o Options) Result {
 	}
 }
 
-func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method, rawURL string, ip netip.Addr, headers map[string]string, body string, jar http.CookieJar, http1Only bool) (*http.Response, phases, *http.Transport, context.CancelFunc, error) {
+func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method string, u *url.URL, ip netip.Addr, headers map[string]string, body string, jar http.CookieJar, http1Only bool) (*http.Response, phases, func(), context.CancelFunc, error) {
 	hctx, cancel := context.WithTimeout(ctx, hopTimeout)
+	noop := func() {}
 
-	var connStart, connDone, tlsStart, tlsDone, firstByte time.Time
+	hc, err := connect(hctx, u, ip, connectTimeout, http1Only)
+	if err != nil {
+		return nil, phases{}, noop, cancel, err
+	}
+	ph := phases{tcp: hc.tcp, tls: hc.tls, proto: hc.proto}
+
+	var firstByte time.Time
 	trace := &httptrace.ClientTrace{
-		ConnectStart: func(_, _ string) {
-			if connStart.IsZero() {
-				connStart = time.Now()
-			}
-		},
-		ConnectDone:          func(_, _ string, _ error) { connDone = time.Now() },
-		TLSHandshakeStart:    func() { tlsStart = time.Now() },
-		TLSHandshakeDone:     func(_ tls.ConnectionState, _ error) { tlsDone = time.Now() },
 		GotFirstResponseByte: func() { firstByte = time.Now() },
 	}
 
-	dialer := &net.Dialer{Timeout: connectTimeout}
-	tr := &http.Transport{
-		// The host was resolved and vetted once; every dial goes to that
-		// address. TLS still verifies against the URL's hostname.
-		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
-			_, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			return dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
-		},
-		ForceAttemptHTTP2:   !http1Only,
-		TLSHandshakeTimeout: connectTimeout,
-		MaxIdleConns:        1,
-	}
-	if http1Only {
-		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
-	}
 	client := &http.Client{
-		Transport: tr,
+		Transport: hc.rt,
 		Jar:       jar,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -279,9 +272,9 @@ func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method
 	if body != "" && (method == "POST" || method == "PUT" || method == "PATCH") {
 		reader = strings.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(hctx, trace), method, rawURL, reader)
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(hctx, trace), method, u.String(), reader)
 	if err != nil {
-		return nil, phases{}, tr, cancel, err
+		return nil, ph, hc.close, cancel, err
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -292,29 +285,16 @@ func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method
 
 	resp, err := client.Do(req)
 
-	var ph phases
-	if !connStart.IsZero() && !connDone.IsZero() {
-		ph.tcp = connDone.Sub(connStart)
-	}
-	if !tlsStart.IsZero() && !tlsDone.IsZero() {
-		ph.tls = tlsDone.Sub(tlsStart)
-	}
 	// Phase-isolated TTFB: from "connection fully ready" to the first
 	// response byte, so the phases add up instead of double-counting.
-	ready := connDone
-	if !tlsDone.IsZero() {
-		ready = tlsDone
+	if !firstByte.IsZero() {
+		ph.ttfb = max(0, firstByte.Sub(hc.ready))
 	}
-	if !ready.IsZero() && !firstByte.IsZero() {
-		ph.ttfb = firstByte.Sub(ready)
-	}
-	for _, d := range []*time.Duration{&ph.tcp, &ph.tls, &ph.ttfb} {
-		if *d < 0 {
-			*d = 0
-		}
+	if resp != nil && resp.Proto != "" {
+		ph.proto = resp.Proto
 	}
 
-	return resp, ph, tr, cancel, err
+	return resp, ph, hc.close, cancel, err
 }
 
 func isRedirect(code int) bool {

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -70,6 +71,7 @@ func runCheck(args []string) {
 	allowPrivate := fs.Bool("allow-private", false, "skip the public-address guard (local testing only)")
 	http1 := fs.Bool("http1", false, "HTTP/1.1 only (fingerprint diagnosis)")
 	bare := fs.Bool("bare-headers", false, "send only the User-Agent (fingerprint diagnosis)")
+	printBody := fs.Bool("print-body", false, "write the response body to stderr")
 	headers := headerFlags{}
 	fs.Var(headers, "header", "extra header k=v (repeatable)")
 	fs.Parse(args)
@@ -78,6 +80,10 @@ func runCheck(args []string) {
 	}
 
 	follow := !*noRedirects
+	var sink io.Writer
+	if *printBody {
+		sink = os.Stderr
+	}
 	res := check.Run(context.Background(), check.Options{
 		URL:             fs.Arg(0),
 		Method:          *method,
@@ -90,6 +96,7 @@ func runCheck(args []string) {
 		AllowPrivate:    *allowPrivate,
 		HTTP1Only:       *http1,
 		BareHeaders:     *bare,
+		BodySink:        sink,
 	})
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
