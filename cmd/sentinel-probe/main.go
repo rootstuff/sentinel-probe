@@ -43,7 +43,7 @@ func usage() {
   sentinel-probe check [flags] <url>        one check, JSON result on stdout
   sentinel-probe bench [flags]              concurrent checks, summary on stdout
 
-check flags: -timeout 30s -region local -accept 2xx,3xx -method GET -body '' -no-redirects -header k=v (repeatable) -allow-private
+check flags: -timeout 30s -region local -accept 2xx,3xx -method GET -body '' -no-redirects -header k=v (repeatable) -http2 -print-body -allow-private
 bench flags: -urls FILE | -local -delay 500ms   -n 1000 -concurrency 200 -timeout 30s -region bench`)
 	os.Exit(2)
 }
@@ -69,7 +69,7 @@ func runCheck(args []string) {
 	body := fs.String("body", "", "request body for POST/PUT/PATCH")
 	noRedirects := fs.Bool("no-redirects", false, "do not follow redirects")
 	allowPrivate := fs.Bool("allow-private", false, "skip the public-address guard (local testing only)")
-	http1 := fs.Bool("http1", false, "HTTP/1.1 only (fingerprint diagnosis)")
+	http2 := fs.Bool("http2", false, "offer HTTP/2 (off by default, see Options.HTTP2)")
 	bare := fs.Bool("bare-headers", false, "send only the User-Agent (fingerprint diagnosis)")
 	printBody := fs.Bool("print-body", false, "write the response body to stderr")
 	headers := headerFlags{}
@@ -94,7 +94,7 @@ func runCheck(args []string) {
 		Headers:         headers,
 		Body:            *body,
 		AllowPrivate:    *allowPrivate,
-		HTTP1Only:       *http1,
+		HTTP2:           *http2,
 		BareHeaders:     *bare,
 		BodySink:        sink,
 	})

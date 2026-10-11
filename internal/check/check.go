@@ -49,9 +49,13 @@ type Options struct {
 	Body            string
 	// AllowPrivate disables the public-address guard. Local benchmarking only.
 	AllowPrivate bool
-	// HTTP1Only turns HTTP/2 off, to tell a TLS fingerprint block from an
-	// HTTP/2 fingerprint block.
-	HTTP1Only bool
+	// HTTP2 opts in to HTTP/2. Off by default: a check is one request on one
+	// connection, so multiplexing buys nothing, and Akamai's bot manager
+	// fingerprints the h2 SETTINGS/window/header-order of Go's x/net client
+	// (www.microsoft.com returned 403 on h2 and 200 on HTTP/1.1 from the
+	// same box, after the TLS handshake had already been made to pass).
+	// curl's h2 shape is not reproducible without forking x/net.
+	HTTP2 bool
 	// BareHeaders sends only the User-Agent, to rule the header set out.
 	BareHeaders bool
 	// BodySink, when set, receives the final response body (up to MaxBodyBytes).
@@ -178,7 +182,7 @@ func Run(ctx context.Context, o Options) Result {
 			hopTimeout = max(time.Second, remaining)
 		}
 
-		resp, ph, closeHop, hopCancel, err := doHop(ctx, hopTimeout, connectTimeout, method, u, ip, headers, body, jar, o.HTTP1Only)
+		resp, ph, closeHop, hopCancel, err := doHop(ctx, hopTimeout, connectTimeout, method, u, ip, headers, body, jar, !o.HTTP2)
 		res.TCPMs, res.TLSMs, res.TTFBMs = int(ph.tcp.Milliseconds()), int(ph.tls.Milliseconds()), int(ph.ttfb.Milliseconds())
 		if ph.proto != "" {
 			res.Proto = ph.proto

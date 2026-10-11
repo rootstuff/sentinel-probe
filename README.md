@@ -28,6 +28,11 @@ host rejected when any of its addresses is non-public.
 
 ## Known deltas
 
+- The probe speaks HTTP/1.1 and presents an OpenSSL-shaped TLS handshake (uTLS).
+  PHP uses curl with HTTP/2. Found on the London node: Akamai's bot manager refused
+  Go's stock TLS fingerprint, then refused Go's HTTP/2 fingerprint, from a
+  datacenter address, while curl passed. One request per connection makes h2 moot.
+
 - Response bodies are capped at 10 MB. PHP reads everything.
 - `Accept-Encoding` offers gzip only (Go handles it transparently). PHP also offers deflate.
 - Multicast ranges are blocked here, not in PHP.
