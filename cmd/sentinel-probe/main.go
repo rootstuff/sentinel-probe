@@ -33,15 +33,24 @@ func main() {
 		runCheck(os.Args[2:])
 	case "bench":
 		runBench(os.Args[2:])
+	case "serve":
+		runServe(os.Args[2:])
+	case "version":
+		fmt.Println(version)
 	default:
 		usage()
 	}
 }
 
+// version is set at build time: -ldflags "-X main.version=1.2.3".
+var version = "dev"
+
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
+  sentinel-probe serve [flags]              run as a node: sync, check, report (see -h)
   sentinel-probe check [flags] <url>        one check, JSON result on stdout
   sentinel-probe bench [flags]              concurrent checks, summary on stdout
+  sentinel-probe version
 
 check flags: -timeout 30s -region local -accept 2xx,3xx -method GET -body '' -no-redirects -header k=v (repeatable) -http2 -print-body -allow-private
 bench flags: -urls FILE | -local -delay 500ms   -n 1000 -concurrency 200 -timeout 30s -region bench`)
