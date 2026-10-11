@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"runtime"
 	"sort"
@@ -171,7 +172,13 @@ func runBench(args []string) {
 			if r.Status == "online" {
 				online++
 			} else if r.Error != nil {
-				errs[*r.Error]++
+				// Keyed by error and host, so a WAF that dislikes this node's
+				// IP shows up by name instead of as a count.
+				host := u
+				if parsed, err := url.Parse(u); err == nil && parsed.Host != "" {
+					host = parsed.Host
+				}
+				errs[*r.Error+" @ "+host]++
 			}
 			mu.Unlock()
 		}(urls[i%len(urls)])
