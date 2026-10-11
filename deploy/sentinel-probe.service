@@ -16,6 +16,12 @@ RestartSec=2
 LimitNOFILE=65536
 StateDirectory=sentinel-probe
 StateDirectoryMode=0700
+# Ping checks run /usr/bin/ping, which needs raw ICMP sockets. With
+# NoNewPrivileges the kernel ignores the binary's own cap_net_raw, and the
+# Ubuntu image leaves the unprivileged fallback off (ping_group_range "1 0"),
+# so the service holds the capability and its children inherit it.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

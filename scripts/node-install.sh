@@ -61,6 +61,12 @@ fi
 # Benchmarks open thousands of sockets; the default 1024 fds would be the first thing to fail.
 grep -q 'sentinel-probe' /etc/security/limits.conf || printf '* soft nofile 65536\n* hard nofile 65536\n# sentinel-probe\n' >> /etc/security/limits.conf
 echo "installed: sentinel-probe $(sentinel-probe version)"
-echo "smoke:"
+echo "smoke (http):"
 sentinel-probe check -region "$(hostname)" https://sentinel.rootstuff.io
+echo "smoke (ping inside the service sandbox):"
+if systemd-run --quiet --wait --pipe -p User=probe -p NoNewPrivileges=yes -p AmbientCapabilities=CAP_NET_RAW -p CapabilityBoundingSet=CAP_NET_RAW -p ProtectSystem=strict -p PrivateTmp=yes -p ProtectHome=yes ping -c 1 -q sentinel.rootstuff.io >/dev/null 2>&1; then
+  echo "  ping works under the unit's sandbox"
+else
+  echo "  WARNING: ping fails under the unit's sandbox; ping monitors from this node will read offline" >&2
+fi
 REMOTE
