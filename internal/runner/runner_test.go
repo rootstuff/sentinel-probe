@@ -40,7 +40,7 @@ func newFakeControl(t *testing.T, target string) *fakeControl {
 				"id": 42, "url": target + "/ok", "interval_seconds": 30, "timeout": 5, "method": "GET",
 				"headers": map[string]string{"X-Custom": "1"}, "body": nil, "accepted_status_codes": []string{"2xx"},
 				"follow_redirects": true, "auth": map[string]string{"username": "u", "password": "p"},
-				"check_types": []string{"http"}, "last_checked_at": nil,
+				"check_types": []string{"http", "json"}, "needs_body": true, "last_checked_at": nil,
 			}},
 		}
 	}
@@ -173,6 +173,9 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if gotAuth != "Basic dTpw" || gotCustom != "1" {
 		t.Errorf("request headers auth=%q custom=%q", gotAuth, gotCustom)
+	}
+	if res["body_b64"] == nil || res["headers"] == nil {
+		t.Errorf("needs_body monitor should post body and headers: %v", res)
 	}
 }
 

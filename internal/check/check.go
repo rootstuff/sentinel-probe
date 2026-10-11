@@ -8,6 +8,7 @@ package check
 import (
 	"context"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,8 @@ const (
 	// MaxBodyBytes caps how much of a response is read. PHP reads the whole
 	// body; the cap is an explicit safety the Laravel side never had.
 	MaxBodyBytes = 10 << 20
+	// CaptureBodyBytes caps what travels back to the control plane.
+	CaptureBodyBytes = 2 << 20
 )
 
 // Options describes one check. Zero values take the monitor defaults.
@@ -57,6 +60,10 @@ type Options struct {
 	BareHeaders bool
 	// BodySink, when set, receives the final response body (up to MaxBodyBytes).
 	BodySink io.Writer
+	// CaptureBody keeps the final response's headers and up to
+	// CaptureBodyBytes of its decoded body on the Result, for monitors the
+	// control plane judges itself (payment envelopes, JSON assertions).
+	CaptureBody bool
 	// Hello picks the ClientHello: "safe" (default: OpenSSL-shaped, only what
 	// Go completes), "curl" (curl/OpenSSL byte for byte) or "go" (stock
 	// crypto/tls). See hop.go for why safe is the default.
@@ -78,6 +85,10 @@ type Result struct {
 	Hops         int     `json:"hops"`
 	BodyBytes    int64   `json:"body_bytes"`
 	Proto        string  `json:"proto,omitempty"`
+	// Set only with Options.CaptureBody.
+	Headers       map[string][]string `json:"headers,omitempty"`
+	BodyB64       string              `json:"body_b64,omitempty"`
+	BodyTruncated bool                `json:"body_truncated,omitempty"`
 }
 
 type phases struct {
@@ -178,6 +189,11 @@ func Run(ctx context.Context, o Options) Result {
 		if o.BodySink != nil {
 			sink = o.BodySink
 		}
+		var capture *limitedBuffer
+		if o.CaptureBody {
+			capture = &limitedBuffer{limit: CaptureBodyBytes}
+			sink = io.MultiWriter(sink, capture)
+		}
 		decoded, decErr := decodeBody(resp)
 		var n int64
 		readErr := decErr
@@ -198,6 +214,11 @@ func Run(ctx context.Context, o Options) Result {
 		location := resp.Header.Get("Location")
 
 		if !*o.FollowRedirects || !isRedirect(code) || location == "" {
+			if capture != nil {
+				res.Headers = resp.Header.Clone()
+				res.BodyB64 = base64.StdEncoding.EncodeToString(capture.buf)
+				res.BodyTruncated = capture.truncated
+			}
 			res.FinalURL = current
 			res.ResponseTime = int(time.Since(start).Milliseconds())
 			if statusAccepted(code, o.AcceptedCodes) {
@@ -365,4 +386,26 @@ func simplify(err error) string {
 		msg = msg[:100]
 	}
 	return msg
+}
+
+// limitedBuffer keeps the first `limit` bytes and remembers whether more came.
+type limitedBuffer struct {
+	buf       []byte
+	limit     int
+	truncated bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	room := b.limit - len(b.buf)
+	if room > 0 {
+		if len(p) > room {
+			b.buf = append(b.buf, p[:room]...)
+			b.truncated = true
+		} else {
+			b.buf = append(b.buf, p...)
+		}
+	} else if len(p) > 0 {
+		b.truncated = true
+	}
+	return len(p), nil
 }

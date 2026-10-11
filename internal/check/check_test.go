@@ -175,3 +175,26 @@ func TestGzipBodyIsDecoded(t *testing.T) {
 		t.Fatalf("gzip: %+v", r)
 	}
 }
+
+func TestCaptureBodyAndHeaders(t *testing.T) {
+	s := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Thing", "yes")
+		w.Write([]byte(`{"ok":true}`))
+	})
+	r := run(t, Options{URL: s.URL, CaptureBody: true})
+	if r.Headers["X-Thing"][0] != "yes" || r.BodyB64 == "" || r.BodyTruncated {
+		t.Fatalf("capture: %+v", r)
+	}
+	if r2 := run(t, Options{URL: s.URL}); r2.Headers != nil || r2.BodyB64 != "" {
+		t.Fatalf("no capture by default: %+v", r2)
+	}
+}
+
+func TestCaptureTruncatesLargeBodies(t *testing.T) {
+	big := make([]byte, CaptureBodyBytes+10)
+	s := serve(t, func(w http.ResponseWriter, r *http.Request) { w.Write(big) })
+	r := run(t, Options{URL: s.URL, CaptureBody: true})
+	if !r.BodyTruncated || r.BodyBytes != int64(len(big)) {
+		t.Fatalf("truncation: truncated=%v bytes=%d", r.BodyTruncated, r.BodyBytes)
+	}
+}

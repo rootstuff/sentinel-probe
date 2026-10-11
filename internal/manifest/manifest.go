@@ -24,7 +24,10 @@ type Monitor struct {
 	FollowRedirects     bool              `json:"follow_redirects"`
 	Auth                *Auth             `json:"auth"`
 	CheckTypes          []string          `json:"check_types"`
-	LastCheckedAt       *time.Time        `json:"last_checked_at"`
+	// NeedsBody: send the response headers and body back; the control
+	// plane judges them (payment envelope, JSON assertions).
+	NeedsBody     bool       `json:"needs_body"`
+	LastCheckedAt *time.Time `json:"last_checked_at"`
 }
 
 // Auth is HTTP basic auth, decrypted by the control plane for this node.

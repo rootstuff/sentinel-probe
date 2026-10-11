@@ -23,6 +23,7 @@ import (
 	"github.com/rootstuff/sentinel-probe/internal/check"
 	"github.com/rootstuff/sentinel-probe/internal/control"
 	"github.com/rootstuff/sentinel-probe/internal/manifest"
+	"github.com/rootstuff/sentinel-probe/internal/robots"
 	"github.com/rootstuff/sentinel-probe/internal/spool"
 )
 
@@ -59,6 +60,7 @@ type Runner struct {
 	lastSync time.Time
 	syncErr  string
 
+	robots     *robots.Cache
 	inFlight   atomic.Int64
 	checksMin  atomic.Int64
 	sem        chan struct{}
@@ -103,6 +105,7 @@ func New(cfg Config, client *control.Client) (*Runner, error) {
 		sem:        make(chan struct{}, cfg.Concurrency),
 		startedAt:  time.Now(),
 		postWakeup: make(chan struct{}, 1),
+		robots:     robots.New(cfg.AllowPrivate),
 	}
 	if m, err := r.store.Load(); err != nil {
 		r.log.Warn("cached manifest unreadable", "error", err)
@@ -290,7 +293,14 @@ func (r *Runner) execute(ctx context.Context, m manifest.Monitor) {
 	defer r.inFlight.Add(-1)
 	r.checksMin.Add(1)
 
-	result := check.Run(context.Background(), r.options(m))
+	var result any
+	if !r.robots.Allowed(context.Background(), m.URL) {
+		// As MonitorCheckService does: a robots-blocked target reads as
+		// online with no request made.
+		result = map[string]any{"status": "online", "response_time": 0, "status_code": nil, "error": nil, "robots_txt_blocked": true}
+	} else {
+		result = check.Run(context.Background(), r.options(m))
+	}
 	checkedAt := time.Now()
 	if err := r.spool.Add(m.ID, checkedAt, result); err != nil {
 		r.log.Error("result could not be spooled", "monitor_id", m.ID, "error", err)
@@ -331,6 +341,7 @@ func (r *Runner) options(m manifest.Monitor) check.Options {
 		Headers:         headers,
 		Body:            body,
 		AllowPrivate:    r.cfg.AllowPrivate,
+		CaptureBody:     m.NeedsBody,
 	}
 }
 
@@ -369,6 +380,15 @@ func (r *Runner) post(ctx context.Context) bool {
 		items := r.spool.Take(r.cfg.BatchSize)
 		if len(items) == 0 {
 			return true
+		}
+		// Captured bodies make results big; keep a request under ~4 MB.
+		size := 0
+		for i, it := range items {
+			size += len(it.Result)
+			if size > 4<<20 && i > 0 {
+				items = items[:i]
+				break
+			}
 		}
 		pctx, cancel := context.WithTimeout(ctx, 55*time.Second)
 		ack, err := r.client.PostResults(pctx, items)
