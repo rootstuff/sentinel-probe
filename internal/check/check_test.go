@@ -1,6 +1,7 @@
 package check
 
 import (
+	"compress/gzip"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -143,5 +144,34 @@ func TestConnectTimeoutSplit(t *testing.T) {
 		if got := ConnectTimeout(in); got != want {
 			t.Errorf("ConnectTimeout(%v) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+func TestHeadWithEncodingHeaderIsOnline(t *testing.T) {
+	s := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", "1234")
+		if r.Method == "HEAD" {
+			w.WriteHeader(200)
+			return
+		}
+		w.WriteHeader(500)
+	})
+	r := run(t, Options{URL: s.URL, Method: "HEAD"})
+	if r.Status != "online" || r.StatusCode == nil || *r.StatusCode != 200 || r.Error != nil {
+		t.Fatalf("HEAD with gzip header: %+v", r)
+	}
+}
+
+func TestGzipBodyIsDecoded(t *testing.T) {
+	s := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		gz.Write([]byte("hello hello hello"))
+		gz.Close()
+	})
+	r := run(t, Options{URL: s.URL})
+	if r.Status != "online" || r.BodyBytes != 17 {
+		t.Fatalf("gzip: %+v", r)
 	}
 }

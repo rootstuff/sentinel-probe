@@ -151,6 +151,12 @@ func (f closerFunc) Close() error { return f() }
 // decodeBody returns a reader that unwraps the response's Content-Encoding,
 // as Guzzle's decode_content does.
 func decodeBody(resp *http.Response) (io.Reader, error) {
+	// No body to decode: a HEAD answer, 1xx, 204 and 304 carry the headers
+	// of the body they would have had (Content-Encoding included) and
+	// nothing else. Reading a gzip header from nothing is an EOF.
+	if (resp.Request != nil && resp.Request.Method == "HEAD") || resp.StatusCode/100 == 1 || resp.StatusCode == 204 || resp.StatusCode == 304 {
+		return resp.Body, nil
+	}
 	switch strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))) {
 	case "gzip":
 		return gzip.NewReader(resp.Body)
