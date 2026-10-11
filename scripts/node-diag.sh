@@ -13,7 +13,7 @@ curl -s --http1.1 -A "$UA" https://tls.peet.ws/api/all > /tmp/fp-curl.json
 sentinel-probe check -print-body https://tls.peet.ws/api/all 2>/tmp/fp-probe.json >/dev/null
 for who in curl probe; do
   echo "-- $who"
-  jq -r '"ja3=\(.tls.ja3_hash) ja4=\(.tls.ja4)", "ja3 text: \(.tls.ja3)", "extensions: \([.tls.extensions[].name] | join(", "))"' /tmp/fp-$who.json
+  jq -r '"ja3=\(.tls.ja3_hash) ja4=\(.tls.ja4)", "ja3 text: \(.tls.ja3)", "sigalgs: \([.tls.extensions[] | select(.name | startswith("signature_algorithms")) | .signature_algorithms[]?] | join(","))"' /tmp/fp-$who.json
 done
 
 echo "== single probe check (is this address currently blocked for the probe?)"
