@@ -27,6 +27,7 @@ import (
 	"github.com/rootstuff/sentinel-probe/internal/port"
 	"github.com/rootstuff/sentinel-probe/internal/ssl"
 	"github.com/rootstuff/sentinel-probe/internal/target"
+	"github.com/rootstuff/sentinel-probe/internal/whois"
 )
 
 func main() {
@@ -87,7 +88,7 @@ func runCheck(args []string) {
 	bare := fs.Bool("bare-headers", false, "send only the User-Agent (fingerprint diagnosis)")
 	printBody := fs.Bool("print-body", false, "write the response body to stderr")
 	hello := fs.String("hello", "safe", "TLS ClientHello to present: safe (default), curl, go")
-	typ := fs.String("type", "http", "check type: http (default), ssl, dns, ping, port")
+	typ := fs.String("type", "http", "check type: http (default), ssl, dns, domain, ping, port")
 	portNum := fs.Int("port", 0, "port for -type port")
 	headers := headerFlags{}
 	fs.Var(headers, "header", "extra header k=v (repeatable)")
@@ -104,6 +105,9 @@ func runCheck(args []string) {
 		return
 	case "dns":
 		enc.Encode(dnsq.Run(context.Background(), target.ExtractHost(fs.Arg(0))))
+		return
+	case "domain":
+		enc.Encode(whois.Lookup(context.Background(), fs.Arg(0)))
 		return
 	case "ping":
 		enc.Encode(ping.Run(context.Background(), fs.Arg(0)))

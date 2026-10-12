@@ -30,6 +30,7 @@ import (
 	"github.com/rootstuff/sentinel-probe/internal/spool"
 	"github.com/rootstuff/sentinel-probe/internal/ssl"
 	"github.com/rootstuff/sentinel-probe/internal/target"
+	"github.com/rootstuff/sentinel-probe/internal/whois"
 )
 
 type Config struct {
@@ -453,6 +454,8 @@ func (r *Runner) execute(ctx context.Context, m manifest.Monitor) {
 		result = ssl.Run(context.Background(), m.URL, r.cfg.AllowPrivate)
 	case "dns":
 		result = dnsq.Run(context.Background(), target.ExtractHost(m.URL))
+	case "domain":
+		result = whois.Lookup(context.Background(), m.Domain)
 	case "ping":
 		result = ping.Run(context.Background(), m.URL)
 	case "port":
@@ -461,7 +464,7 @@ func (r *Runner) execute(ctx context.Context, m manifest.Monitor) {
 			p = *m.Port
 		}
 		result = port.Run(context.Background(), m.URL, p)
-	default: // http, and keyword (an http fetch the control plane judges)
+	default: // http (keywords and assertions are judged on the control plane)
 		if !r.robots.Allowed(context.Background(), m.URL) {
 			// As MonitorCheckService does: a robots-blocked target reads as
 			// online with no request made.
