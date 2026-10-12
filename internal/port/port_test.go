@@ -26,8 +26,8 @@ func TestSimplify(t *testing.T) {
 		"dial tcp 1.2.3.4:22: connect: no route to host":   "Network unreachable",
 	}
 	for in, want := range cases {
-		if got := simplify(&net.OpError{Err: errString(in)}); got != want {
-			t.Errorf("simplify(%q) = %q, want %q", in, got, want)
+		if got := Simplify(&net.OpError{Err: errString(in)}); got != want {
+			t.Errorf("Simplify(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

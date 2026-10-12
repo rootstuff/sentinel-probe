@@ -221,6 +221,22 @@ func connect(ctx context.Context, u *url.URL, ip netip.Addr, connectTimeout time
 	return hc, nil
 }
 
+// SafeHandshake completes a TLS handshake on raw with the safe hello (the
+// OpenSSL-shaped one every HTTP check presents, so a server negotiates the
+// same suite it does with the PHP edge). With skipVerify the certificate is
+// not validated: the SSL sub-check reads expired and mismatched
+// certificates on purpose.
+func SafeHandshake(ctx context.Context, raw net.Conn, serverName string, skipVerify bool) (*utls.UConn, error) {
+	uconn := utls.UClient(raw, &utls.Config{ServerName: serverName, InsecureSkipVerify: skipVerify}, utls.HelloCustom)
+	if err := uconn.ApplyPreset(safeHello(true)); err != nil {
+		return nil, err
+	}
+	if err := uconn.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	return uconn, nil
+}
+
 func handshake(ctx context.Context, raw net.Conn, serverName string, spec *utls.ClientHelloSpec) (*utls.UConn, error) {
 	uconn := utls.UClient(raw, &utls.Config{ServerName: serverName}, utls.HelloCustom)
 	if err := uconn.ApplyPreset(spec); err != nil {

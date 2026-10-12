@@ -22,6 +22,11 @@ import (
 	"time"
 
 	"github.com/rootstuff/sentinel-probe/internal/check"
+	"github.com/rootstuff/sentinel-probe/internal/dnsq"
+	"github.com/rootstuff/sentinel-probe/internal/ping"
+	"github.com/rootstuff/sentinel-probe/internal/port"
+	"github.com/rootstuff/sentinel-probe/internal/ssl"
+	"github.com/rootstuff/sentinel-probe/internal/target"
 )
 
 func main() {
@@ -82,11 +87,30 @@ func runCheck(args []string) {
 	bare := fs.Bool("bare-headers", false, "send only the User-Agent (fingerprint diagnosis)")
 	printBody := fs.Bool("print-body", false, "write the response body to stderr")
 	hello := fs.String("hello", "safe", "TLS ClientHello to present: safe (default), curl, go")
+	typ := fs.String("type", "http", "check type: http (default), ssl, dns, ping, port")
+	portNum := fs.Int("port", 0, "port for -type port")
 	headers := headerFlags{}
 	fs.Var(headers, "header", "extra header k=v (repeatable)")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		usage()
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	switch *typ {
+	case "ssl":
+		enc.Encode(ssl.Run(context.Background(), fs.Arg(0), *allowPrivate))
+		return
+	case "dns":
+		enc.Encode(dnsq.Run(context.Background(), target.ExtractHost(fs.Arg(0))))
+		return
+	case "ping":
+		enc.Encode(ping.Run(context.Background(), fs.Arg(0)))
+		return
+	case "port":
+		enc.Encode(port.Run(context.Background(), fs.Arg(0), *portNum))
+		return
 	}
 
 	follow := !*noRedirects
@@ -109,8 +133,6 @@ func runCheck(args []string) {
 		BodySink:        sink,
 		Hello:           *hello,
 	})
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
 	enc.Encode(res)
 }
 

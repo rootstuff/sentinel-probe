@@ -45,14 +45,15 @@ func Run(ctx context.Context, rawTarget string, port int) Result {
 	start := time.Now()
 	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
-		return offline(simplify(err))
+		return offline(Simplify(err))
 	}
 	conn.Close()
 	ms := int(time.Since(start).Milliseconds())
 	return Result{Status: "online", LatencyMs: &ms}
 }
 
-func simplify(err error) string {
+// Simplify folds a dial error into the five phrases PortService stores.
+func Simplify(err error) string {
 	msg := err.Error()
 	lower := strings.ToLower(msg)
 	var ne net.Error

@@ -22,11 +22,14 @@ import (
 
 	"github.com/rootstuff/sentinel-probe/internal/check"
 	"github.com/rootstuff/sentinel-probe/internal/control"
+	"github.com/rootstuff/sentinel-probe/internal/dnsq"
 	"github.com/rootstuff/sentinel-probe/internal/manifest"
 	"github.com/rootstuff/sentinel-probe/internal/ping"
 	"github.com/rootstuff/sentinel-probe/internal/port"
 	"github.com/rootstuff/sentinel-probe/internal/robots"
 	"github.com/rootstuff/sentinel-probe/internal/spool"
+	"github.com/rootstuff/sentinel-probe/internal/ssl"
+	"github.com/rootstuff/sentinel-probe/internal/target"
 )
 
 type Config struct {
@@ -58,7 +61,7 @@ type Runner struct {
 
 	mu       sync.Mutex
 	manifest *manifest.Manifest
-	stamps   map[int64]int64 // monitor id -> slot of the last dispatch
+	stamps   map[rowKey]int64 // manifest row -> slot of the last dispatch
 	lastSync time.Time
 	syncErr  string
 
@@ -103,7 +106,7 @@ func New(cfg Config, client *control.Client) (*Runner, error) {
 		store:      manifest.NewStore(cfg.DataDir),
 		spool:      sp,
 		log:        cfg.Log,
-		stamps:     map[int64]int64{},
+		stamps:     map[rowKey]int64{},
 		sem:        make(chan struct{}, cfg.Concurrency),
 		startedAt:  time.Now(),
 		postWakeup: make(chan struct{}, 1),
@@ -215,19 +218,20 @@ func (r *Runner) adopt(m *manifest.Manifest, err error) []manifest.Monitor {
 		return nil
 	}
 
-	known := map[int64]bool{}
+	known := map[rowKey]bool{}
 	if r.manifest != nil {
 		for _, old := range r.manifest.Monitors {
-			known[old.ID] = true
+			known[keyOf(old)] = true
 		}
 	}
 	var arrivals []manifest.Monitor
 	slot := slotOf(time.Now())
 	for _, mon := range m.Monitors {
-		if _, stamped := r.stamps[mon.ID]; stamped || known[mon.ID] || mon.LastCheckedAt != nil {
+		k := keyOf(mon)
+		if _, stamped := r.stamps[k]; stamped || known[k] || mon.LastCheckedAt != nil {
 			continue
 		}
-		r.stamps[mon.ID] = slot
+		r.stamps[k] = slot
 		arrivals = append(arrivals, mon)
 	}
 
@@ -248,6 +252,22 @@ func (r *Runner) monitorCount() int {
 
 // ---- cadence (DispatchCadence.php, kept identical)
 
+// rowKey identifies a manifest row: a monitor appears once per check it
+// gets from this region (its http check, and its ssl or dns sub-check
+// when this region runs those), each on its own cadence.
+type rowKey struct {
+	typ string
+	id  int64
+}
+
+func keyOf(m manifest.Monitor) rowKey {
+	typ := m.Type
+	if typ == "" {
+		typ = "http"
+	}
+	return rowKey{typ: typ, id: m.ID}
+}
+
 func slotOf(t time.Time) int64 { return t.Unix() / 30 * 30 }
 
 // StablePhase is DispatchCadence::stablePhase: 6-20s, constant per monitor.
@@ -258,8 +278,11 @@ func (r *Runner) isDue(m manifest.Monitor, now time.Time) bool {
 	if interval <= 0 {
 		interval = 60
 	}
-	if stamp, ok := r.stamps[m.ID]; ok {
-		return now.Unix()-stamp >= interval-5
+	// Slots, not seconds: a node ticks on the 30s grid, so the next tick
+	// after a stamp is a full slot later; measuring from mid-slot (a test
+	// ticking every 200ms) would re-dispatch in a slot's last five seconds.
+	if stamp, ok := r.stamps[keyOf(m)]; ok {
+		return slotOf(now)-stamp >= interval-5
 	}
 	if m.LastCheckedAt != nil {
 		return now.Sub(*m.LastCheckedAt) >= time.Duration(interval-10)*time.Second
@@ -294,15 +317,15 @@ func (r *Runner) tick(ctx context.Context) {
 	for _, m := range r.manifest.Monitors {
 		if r.isDue(m, now) {
 			due = append(due, m)
-			r.stamps[m.ID] = slot
+			r.stamps[keyOf(m)] = slot
 		}
 	}
 	// Forget stamps for monitors that left the manifest.
 	if len(r.stamps) > 2*len(r.manifest.Monitors)+100 {
-		keep := map[int64]int64{}
+		keep := map[rowKey]int64{}
 		for _, m := range r.manifest.Monitors {
-			if s, ok := r.stamps[m.ID]; ok {
-				keep[m.ID] = s
+			if s, ok := r.stamps[keyOf(m)]; ok {
+				keep[keyOf(m)] = s
 			}
 		}
 		r.stamps = keep
@@ -346,6 +369,10 @@ func (r *Runner) execute(ctx context.Context, m manifest.Monitor) {
 		typ = "http"
 	}
 	switch typ {
+	case "ssl":
+		result = ssl.Run(context.Background(), m.URL, r.cfg.AllowPrivate)
+	case "dns":
+		result = dnsq.Run(context.Background(), target.ExtractHost(m.URL))
 	case "ping":
 		result = ping.Run(context.Background(), m.URL)
 	case "port":

@@ -303,6 +303,55 @@ func TestNewMonitorRunsOnArrival(t *testing.T) {
 	<-done
 }
 
+func TestSslRowRunsBesideTheHttpRowOfTheSameMonitor(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }))
+	defer target.Close()
+	f := newFakeControl(t, target.URL)
+	// The same monitor id twice: its http check and its ssl sub-check are
+	// separate rows with separate cadences.
+	f.setManifest(`"v1"`, func() map[string]any {
+		return map[string]any{
+			"region": "test", "generated_at": time.Now().UTC().Format(time.RFC3339),
+			"monitors": []map[string]any{
+				{"id": 5, "type": "http", "url": target.URL + "/", "interval_seconds": 30, "timeout": 5, "method": "GET",
+					"accepted_status_codes": []string{"2xx"}, "follow_redirects": true, "last_checked_at": nil},
+				{"id": 5, "type": "ssl", "url": target.URL + "/", "interval_seconds": 1800, "last_checked_at": nil},
+			},
+		}
+	})
+	r := newTestRunner(t, f, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	waitFor(t, 8*time.Second, func() bool { return f.postedCount() >= 2 })
+	cancel()
+	<-done
+
+	var sslItem, httpItem map[string]any
+	f.mu.Lock()
+	for _, batch := range f.posted {
+		for _, it := range batch {
+			switch it["type"] {
+			case "ssl":
+				sslItem = it
+			case "http":
+				httpItem = it
+			}
+		}
+	}
+	f.mu.Unlock()
+	if sslItem == nil || httpItem == nil {
+		t.Fatalf("both rows should post: %v", f.posted)
+	}
+	res := sslItem["result"].(map[string]any)
+	if res["not_after"] == nil || res["tls_protocol"] != "TLSv1.3" || res["error"] != nil {
+		t.Errorf("ssl facts: %v", res)
+	}
+	if n := f.postedCount(); n != 2 {
+		t.Errorf("one check per row expected, posted %d", n)
+	}
+}
+
 func TestStablePhaseMatchesPHP(t *testing.T) {
 	// 6 + (id * 2654435761) % 15, as DispatchCadence::stablePhase computes it.
 	cases := map[int64]int64{1: 6 + (2654435761 % 15), 2: 6 + (2*2654435761)%15, 237: 6 + (237*2654435761)%15}
