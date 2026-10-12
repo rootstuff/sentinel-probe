@@ -27,11 +27,20 @@ type fakeControl struct {
 	down      atomic.Bool // results answer 503 with nothing accepted
 	srv       *httptest.Server
 	manifest  func() map[string]any
+	tag       string // the ETag the fake currently serves; a sync carrying it is a 304
 	syncCalls atomic.Int64
 }
 
+// setManifest swaps the served manifest and moves the tag, as a control
+// plane does when a monitor changes.
+func (f *fakeControl) setManifest(tag string, m func() map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tag, f.manifest = tag, m
+}
+
 func newFakeControl(t *testing.T, target string) *fakeControl {
-	f := &fakeControl{t: t, target: target}
+	f := &fakeControl{t: t, target: target, tag: `"v1"`}
 	f.manifest = func() map[string]any {
 		return map[string]any{
 			"region":       "test",
@@ -55,13 +64,14 @@ func newFakeControl(t *testing.T, target string) *fakeControl {
 		f.syncs = append(f.syncs, body)
 		f.tokens = append(f.tokens, r.Header.Get("Authorization"))
 		f.etags = append(f.etags, r.Header.Get("If-None-Match"))
+		tag, manifest := f.tag, f.manifest
 		f.mu.Unlock()
-		if r.Header.Get("If-None-Match") == `"v1"` {
+		if r.Header.Get("If-None-Match") == tag {
 			w.WriteHeader(304)
 			return
 		}
-		w.Header().Set("ETag", `"v1"`)
-		json.NewEncoder(w).Encode(f.manifest())
+		w.Header().Set("ETag", tag)
+		json.NewEncoder(w).Encode(manifest())
 	})
 	mux.HandleFunc("/api/probe/results", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -234,6 +244,63 @@ func TestOutageSpoolsAndReplays(t *testing.T) {
 	if r2.spool.Len() != 0 {
 		t.Errorf("spool not drained after replay: %d", r2.spool.Len())
 	}
+}
+
+func TestNewMonitorRunsOnArrival(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }))
+	defer target.Close()
+	f := newFakeControl(t, target.URL)
+	r := newTestRunner(t, f, t.TempDir())
+	// Ticks are far apart: only arrival dispatch can run a new monitor
+	// inside the wait below.
+	r.cfg.TickInterval = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	waitFor(t, 5*time.Second, func() bool { return f.postedCount() >= 2 })
+
+	// The first manifest's monitors were new too, but they ran on the
+	// first tick. Now a monitor appears that this region never checked.
+	checkedBefore := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	f.setManifest(`"v2"`, func() map[string]any {
+		return map[string]any{
+			"region": "test", "generated_at": time.Now().UTC().Format(time.RFC3339),
+			"monitors": []map[string]any{
+				{"id": 42, "type": "http", "url": target.URL + "/ok", "interval_seconds": 30, "timeout": 5, "method": "GET",
+					"accepted_status_codes": []string{"2xx"}, "follow_redirects": true, "last_checked_at": nil},
+				{"id": 99, "type": "http", "url": target.URL + "/new", "interval_seconds": 30, "timeout": 5, "method": "GET",
+					"accepted_status_codes": []string{"2xx"}, "follow_redirects": true, "last_checked_at": nil},
+				// Already checked from this region by a previous node: it
+				// waits for its slot like any other.
+				{"id": 100, "type": "http", "url": target.URL + "/old", "interval_seconds": 30, "timeout": 5, "method": "GET",
+					"accepted_status_codes": []string{"2xx"}, "follow_redirects": true, "last_checked_at": checkedBefore},
+			},
+		}
+	})
+
+	posted := func(id float64) bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, batch := range f.posted {
+			for _, it := range batch {
+				if it["monitor_id"].(float64) == id {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	waitFor(t, 5*time.Second, func() bool { return posted(99) })
+	if posted(100) {
+		t.Error("a monitor this region had checked before must wait for its slot, not run on arrival")
+	}
+	if n := f.postedCount(); n != 3 {
+		t.Errorf("expected exactly one arrival check on top of the first tick's two, got %d", n)
+	}
+	cancel()
+	<-done
 }
 
 func TestStablePhaseMatchesPHP(t *testing.T) {

@@ -31,7 +31,7 @@ func runServe(args []string) {
 	tokenFile := fs.String("token-file", envOr("TOKEN_FILE", "/etc/sentinel-probe/token"), "file holding the node token")
 	dataDir := fs.String("data-dir", envOr("DATA_DIR", "/var/lib/sentinel-probe"), "manifest cache and result spool")
 	concurrency := fs.Int("concurrency", 500, "checks in flight at once")
-	syncEvery := fs.Duration("sync-interval", time.Minute, "manifest sync interval")
+	syncEvery := fs.Duration("sync-interval", 10*time.Second, "manifest poll interval (a quiet poll is a 304 from a version stamp)")
 	debug := fs.Bool("debug", false, "log every tick")
 	fs.Parse(args)
 

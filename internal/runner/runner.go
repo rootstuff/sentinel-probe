@@ -76,7 +76,7 @@ func New(cfg Config, client *control.Client) (*Runner, error) {
 		cfg.Concurrency = 500
 	}
 	if cfg.SyncInterval <= 0 {
-		cfg.SyncInterval = time.Minute
+		cfg.SyncInterval = 10 * time.Second
 	}
 	if cfg.TickInterval <= 0 {
 		cfg.TickInterval = 30 * time.Second
@@ -154,6 +154,15 @@ func (r *Runner) every(ctx context.Context, d time.Duration, f func()) {
 
 // ---- sync
 
+// sync asks the control plane for the manifest. The control plane answers
+// 304 from a version stamp when nothing changed, which is what makes a
+// 10s poll affordable: a quiet poll builds nothing on either side.
+//
+// Monitors that are new to the manifest and have never been checked from
+// this region run as soon as the manifest lands, instead of waiting for
+// the next grid tick and their phase: a monitor someone just created gets
+// its first result from here within the poll interval, as it does from an
+// edge region.
 func (r *Runner) sync(ctx context.Context) {
 	r.mu.Lock()
 	etag := ""
@@ -166,6 +175,23 @@ func (r *Runner) sync(ctx context.Context) {
 	defer cancel()
 	m, err := r.client.Sync(sctx, etag, r.cfg.Version, r.status())
 
+	arrivals := r.adopt(m, err)
+	for _, m := range arrivals {
+		r.wg.Add(1)
+		go func(m manifest.Monitor) {
+			defer r.wg.Done()
+			r.execute(ctx, m)
+		}(m)
+	}
+	if len(arrivals) > 0 {
+		r.log.Info("new monitors checked on arrival", "count", len(arrivals))
+	}
+}
+
+// adopt records the sync outcome under the lock and returns the monitors
+// to check right away: present in the new manifest, absent from the old
+// one, never checked from this region, not yet dispatched here.
+func (r *Runner) adopt(m *manifest.Manifest, err error) []manifest.Monitor {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	switch {
@@ -175,23 +201,42 @@ func (r *Runner) sync(ctx context.Context) {
 		if errors.Is(err, control.ErrUnauthorized) {
 			r.log.Error("token refused; the node keeps checking from its cached manifest until the token is fixed")
 		}
+		return nil
 	case m == nil: // 304
 		r.lastSync, r.syncErr = time.Now(), ""
 		if r.manifest != nil {
 			r.manifest.GeneratedAt = time.Now()
 		}
-	default:
-		if m.Region != r.cfg.Region {
-			r.syncErr = "manifest is for region " + m.Region
-			r.log.Error("manifest belongs to another region; ignored", "manifest_region", m.Region, "region", r.cfg.Region)
-			return
-		}
-		r.manifest, r.lastSync, r.syncErr = m, time.Now(), ""
-		if err := r.store.Save(m); err != nil {
-			r.log.Warn("manifest not cached to disk", "error", err)
-		}
-		r.log.Info("manifest synced", "monitors", len(m.Monitors))
+		return nil
 	}
+	if m.Region != r.cfg.Region {
+		r.syncErr = "manifest is for region " + m.Region
+		r.log.Error("manifest belongs to another region; ignored", "manifest_region", m.Region, "region", r.cfg.Region)
+		return nil
+	}
+
+	known := map[int64]bool{}
+	if r.manifest != nil {
+		for _, old := range r.manifest.Monitors {
+			known[old.ID] = true
+		}
+	}
+	var arrivals []manifest.Monitor
+	slot := slotOf(time.Now())
+	for _, mon := range m.Monitors {
+		if _, stamped := r.stamps[mon.ID]; stamped || known[mon.ID] || mon.LastCheckedAt != nil {
+			continue
+		}
+		r.stamps[mon.ID] = slot
+		arrivals = append(arrivals, mon)
+	}
+
+	r.manifest, r.lastSync, r.syncErr = m, time.Now(), ""
+	if err := r.store.Save(m); err != nil {
+		r.log.Warn("manifest not cached to disk", "error", err)
+	}
+	r.log.Info("manifest synced", "monitors", len(m.Monitors))
+	return arrivals
 }
 
 func (r *Runner) monitorCount() int {
