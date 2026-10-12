@@ -1,0 +1,7 @@
+[Unit]
+Description=Sentinel Go probe updater (asks the control plane which version to run)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sentinel-probe-update

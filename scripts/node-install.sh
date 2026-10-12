@@ -26,7 +26,7 @@ echo "building linux/amd64"
 (cd "$ROOT" && mkdir -p dist && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o dist/sentinel-probe-linux-amd64 ./cmd/sentinel-probe)
 
 echo "copying to $USER_@$IP"
-scp -q "$ROOT/dist/sentinel-probe-linux-amd64" "$ROOT/deploy/sentinel-probe.service" "$ROOT/scripts/node-diag.sh" "$ROOT/scripts/node-cf.sh" "$USER_@$IP:/tmp/"
+scp -q "$ROOT/dist/sentinel-probe-linux-amd64" "$ROOT/deploy/sentinel-probe.service" "$ROOT/deploy/sentinel-probe-update.service" "$ROOT/deploy/sentinel-probe-update.timer" "$ROOT/scripts/sentinel-probe-update.sh" "$ROOT/scripts/node-diag.sh" "$ROOT/scripts/node-cf.sh" "$USER_@$IP:/tmp/"
 for f in "$ROOT/urls/monitors.txt" "$ROOT/urls/bench.txt"; do
   scp -q "$f" "$USER_@$IP:/tmp/sentinel-probe-$(basename "$f")"
 done
@@ -38,6 +38,9 @@ id probe >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/
 command -v ping >/dev/null 2>&1 || (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iputils-ping >/dev/null)
 install -m 0755 /tmp/sentinel-probe-linux-amd64 /usr/local/bin/sentinel-probe
 install -m 0644 /tmp/sentinel-probe.service /etc/systemd/system/sentinel-probe.service
+install -m 0644 /tmp/sentinel-probe-update.service /etc/systemd/system/sentinel-probe-update.service
+install -m 0644 /tmp/sentinel-probe-update.timer /etc/systemd/system/sentinel-probe-update.timer
+install -m 0755 /tmp/sentinel-probe-update.sh /usr/local/bin/sentinel-probe-update
 install -m 0755 /tmp/node-diag.sh /usr/local/bin/sentinel-probe-diag
 install -m 0755 /tmp/node-cf.sh /usr/local/bin/sentinel-probe-cf
 mkdir -p /opt/sentinel-probe
@@ -54,6 +57,8 @@ if [ -f /etc/sentinel-probe/token ]; then
   chmod 0640 /etc/sentinel-probe/token; chgrp probe /etc/sentinel-probe/token
 fi
 systemctl daemon-reload
+# The updater only acts on a version the control plane pins for this region.
+systemctl enable --now sentinel-probe-update.timer >/dev/null 2>&1 || true
 if systemctl is-active --quiet sentinel-probe; then
   systemctl restart sentinel-probe
   echo "service restarted on the new binary"
