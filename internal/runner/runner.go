@@ -29,6 +29,7 @@ import (
 	"github.com/rootstuff/sentinel-probe/internal/robots"
 	"github.com/rootstuff/sentinel-probe/internal/spool"
 	"github.com/rootstuff/sentinel-probe/internal/ssl"
+	"github.com/rootstuff/sentinel-probe/internal/sysinfo"
 	"github.com/rootstuff/sentinel-probe/internal/target"
 	"github.com/rootstuff/sentinel-probe/internal/whois"
 )
@@ -67,6 +68,7 @@ type Runner struct {
 	syncErr  string
 
 	robots     *robots.Cache
+	vitals     *sysinfo.Sampler
 	inFlight   atomic.Int64
 	checksMin  atomic.Int64
 	sem        chan struct{}
@@ -112,6 +114,7 @@ func New(cfg Config, client *control.Client) (*Runner, error) {
 		startedAt:  time.Now(),
 		postWakeup: make(chan struct{}, 1),
 		robots:     robots.New(cfg.AllowPrivate),
+		vitals:     sysinfo.NewSampler(cfg.DataDir),
 	}
 	if m, err := r.store.Load(); err != nil {
 		r.log.Warn("cached manifest unreadable", "error", err)
@@ -647,7 +650,9 @@ func (r *Runner) status() map[string]any {
 	if !r.lastSync.IsZero() {
 		syncedAgo = int(time.Since(r.lastSync).Seconds())
 	}
+	vitals := r.vitals.Read()
 	return map[string]any{
+		"vitals":               vitals,
 		"started_at":           r.startedAt.UTC().Format(time.RFC3339),
 		"uptime_seconds":       int(time.Since(r.startedAt).Seconds()),
 		"monitors":             r.monitorCount(),
