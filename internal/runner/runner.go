@@ -381,7 +381,7 @@ func (r *Runner) execute(ctx context.Context, m manifest.Monitor) {
 			p = *m.Port
 		}
 		result = port.Run(context.Background(), m.URL, p)
-	default:
+	default: // http, and keyword (an http fetch the control plane judges)
 		if !r.robots.Allowed(context.Background(), m.URL) {
 			// As MonitorCheckService does: a robots-blocked target reads as
 			// online with no request made.

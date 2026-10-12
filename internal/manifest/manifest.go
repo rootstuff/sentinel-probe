@@ -14,8 +14,10 @@ import (
 // Monitor is one row of the manifest: the request a check makes.
 type Monitor struct {
 	ID int64 `json:"id"`
-	// Type is http (default), ping, port, ssl or dns. An ssl or dns row
-	// is the monitor's sub-check, listed when this region runs it.
+	// Type is http (default), ping, port, ssl, dns or keyword. An ssl,
+	// dns or keyword row is the monitor's sub-check, listed when this
+	// region runs it. A keyword row is fetched exactly like an http row
+	// (needs_body is set); the control plane judges the page.
 	Type string `json:"type"`
 	// Port for port monitors.
 	Port                *int              `json:"port"`
