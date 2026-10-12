@@ -1,6 +1,6 @@
-// sentinel-probe: the London experiment. One binary that performs Sentinel
-// HTTP checks with the Laravel edge's exact semantics, so the two can be
-// compared on verdicts, timings and cost per in-flight check.
+// sentinel-probe: Sentinel's monitoring node. One binary runs a region's
+// checks with the control plane's exact semantics and reports the results;
+// the control plane judges them.
 package main
 
 import (
