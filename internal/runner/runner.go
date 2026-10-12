@@ -127,10 +127,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.sync(ctx)
 
 	var loops sync.WaitGroup
-	loops.Add(3)
+	loops.Add(4)
 	go func() { defer loops.Done(); r.every(ctx, r.cfg.SyncInterval, func() { r.sync(ctx) }) }()
 	go func() { defer loops.Done(); r.ticks(ctx) }()
 	go func() { defer loops.Done(); r.poster(ctx) }()
+	go func() { defer loops.Done(); r.jobs(ctx) }()
 	loops.Wait()
 
 	// Shutdown: let in-flight checks finish (they are bounded by their own
@@ -248,6 +249,85 @@ func (r *Runner) monitorCount() int {
 		return 0
 	}
 	return len(r.manifest.Monitors)
+}
+
+// ---- on-demand jobs
+
+// jobs long-polls the control plane for on-demand checks and runs each
+// the moment it arrives: a customer's live check or the homepage hero is
+// waiting on the answer. A failed wait backs off; a cancelled context
+// ends the loop.
+func (r *Runner) jobs(ctx context.Context) {
+	backoff := time.Second
+	for ctx.Err() == nil {
+		wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		job, err := r.client.WaitJob(wctx)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			r.log.Warn("job wait failed", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = min(backoff*2, 30*time.Second)
+			continue
+		}
+		backoff = time.Second
+		if job == nil {
+			continue
+		}
+		r.wg.Add(1)
+		go func(job *control.Job) {
+			defer r.wg.Done()
+			r.runJob(ctx, job)
+		}(job)
+	}
+}
+
+// runJob is the probe's /api/check-status: an ephemeral GET with the
+// caller's budget, judged on 2xx/3xx, robots.txt respected.
+func (r *Runner) runJob(ctx context.Context, job *control.Job) {
+	if exp, err := time.Parse(time.RFC3339, job.ExpiresAt); err == nil && time.Now().After(exp) {
+		r.log.Info("on-demand job expired before it ran", "job", job.ID)
+		return
+	}
+	select {
+	case r.sem <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	defer func() { <-r.sem }()
+	r.inFlight.Add(1)
+	defer r.inFlight.Add(-1)
+
+	var result any
+	if !r.robots.Allowed(context.Background(), job.URL) {
+		result = map[string]any{"status": "online", "response_time": 0, "status_code": nil, "error": nil, "robots_txt_blocked": true}
+	} else {
+		timeout := time.Duration(job.Timeout) * time.Second
+		if timeout <= 0 {
+			timeout = 15 * time.Second
+		}
+		follow := true
+		result = check.Run(context.Background(), check.Options{
+			URL:             job.URL,
+			Method:          "GET",
+			Region:          r.cfg.Region,
+			Timeout:         timeout,
+			FollowRedirects: &follow,
+			AcceptedCodes:   []string{"2xx", "3xx"},
+			AllowPrivate:    r.cfg.AllowPrivate,
+		})
+	}
+	pctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := r.client.PostJobResult(pctx, job.ID, result); err != nil {
+		r.log.Warn("on-demand result not delivered", "job", job.ID, "error", err)
+	}
 }
 
 // ---- cadence (DispatchCadence.php, kept identical)

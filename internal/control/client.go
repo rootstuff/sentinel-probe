@@ -1,5 +1,5 @@
 // Package control talks to the Sentinel control plane on behalf of one
-// probe node: a Bearer token, two endpoints, nothing else.
+// probe node: a Bearer token and a handful of endpoints, nothing else.
 package control
 
 import (
@@ -141,4 +141,64 @@ func httpError(resp *http.Response) error {
 		msg = msg[:200]
 	}
 	return fmt.Errorf("control plane answered %d: %s", resp.StatusCode, msg)
+}
+
+// Job is an on-demand check the control plane left for this region: a
+// customer's live check, the homepage hero, an agent's check_url.
+type Job struct {
+	ID           string `json:"id"`
+	URL          string `json:"url"`
+	Timeout      int    `json:"timeout"`
+	SourceRegion string `json:"source_region"`
+	ExpiresAt    string `json:"expires_at"`
+}
+
+// WaitJob asks for the next on-demand job, blocking on the control plane
+// for a few seconds. (nil, nil) means nothing was queued.
+func (c *Client) WaitJob(ctx context.Context) (*Job, error) {
+	req, err := c.request(ctx, "/api/probe/jobs/wait", []byte("{}"))
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var body struct {
+			Job *Job `json:"job"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+			return nil, fmt.Errorf("decode job: %w", err)
+		}
+		return body.Job, nil
+	case http.StatusUnauthorized:
+		return nil, ErrUnauthorized
+	default:
+		return nil, httpError(resp)
+	}
+}
+
+// PostJobResult hands the result of an on-demand job back.
+func (c *Client) PostJobResult(ctx context.Context, id string, result any) error {
+	body, _ := json.Marshal(map[string]any{"result": result})
+	req, err := c.request(ctx, "/api/probe/jobs/"+id+"/result", body)
+	if err != nil {
+		return err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusUnauthorized:
+		return ErrUnauthorized
+	default:
+		return httpError(resp)
+	}
 }

@@ -29,6 +29,9 @@ type fakeControl struct {
 	manifest  func() map[string]any
 	tag       string // the ETag the fake currently serves; a sync carrying it is a 304
 	syncCalls atomic.Int64
+	// jobs are handed out one per wait call; results land by path.
+	jobs       []map[string]any
+	jobResults map[string]map[string]any
 }
 
 // setManifest swaps the served manifest and moves the tag, as a control
@@ -40,7 +43,7 @@ func (f *fakeControl) setManifest(tag string, m func() map[string]any) {
 }
 
 func newFakeControl(t *testing.T, target string) *fakeControl {
-	f := &fakeControl{t: t, target: target, tag: `"v1"`}
+	f := &fakeControl{t: t, target: target, tag: `"v1"`, jobResults: map[string]map[string]any{}}
 	f.manifest = func() map[string]any {
 		return map[string]any{
 			"region":       "test",
@@ -72,6 +75,25 @@ func newFakeControl(t *testing.T, target string) *fakeControl {
 		}
 		w.Header().Set("ETag", tag)
 		json.NewEncoder(w).Encode(manifest())
+	})
+	mux.HandleFunc("/api/probe/jobs/wait", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		var job map[string]any
+		if len(f.jobs) > 0 {
+			job, f.jobs = f.jobs[0], f.jobs[1:]
+		}
+		f.mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]any{"job": job})
+	})
+	mux.HandleFunc("/api/probe/jobs/", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Result map[string]any `json:"result"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.jobResults[r.URL.Path] = body.Result
+		f.mu.Unlock()
+		w.Write([]byte(`{"ok":true}`))
 	})
 	mux.HandleFunc("/api/probe/results", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -349,6 +371,45 @@ func TestSslRowRunsBesideTheHttpRowOfTheSameMonitor(t *testing.T) {
 	}
 	if n := f.postedCount(); n != 2 {
 		t.Errorf("one check per row expected, posted %d", n)
+	}
+}
+
+func TestOnDemandJobRunsOnArrivalAndPostsItsResult(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" {
+			w.WriteHeader(404)
+			return
+		}
+		w.WriteHeader(503)
+	}))
+	defer target.Close()
+	f := newFakeControl(t, target.URL)
+	f.jobs = []map[string]any{
+		{"id": "job-expired", "url": target.URL + "/", "timeout": 5, "source_region": "ash", "expires_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
+		{"id": "job-1", "url": target.URL + "/", "timeout": 5, "source_region": "ash", "expires_at": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)},
+	}
+	r := newTestRunner(t, f, t.TempDir())
+	r.cfg.TickInterval = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	waitFor(t, 5*time.Second, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.jobResults["/api/probe/jobs/job-1/result"] != nil
+	})
+	cancel()
+	<-done
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	res := f.jobResults["/api/probe/jobs/job-1/result"]
+	if res["status"] != "offline" || res["status_code"].(float64) != 503 {
+		t.Errorf("on-demand result: %v", res)
+	}
+	if _, ran := f.jobResults["/api/probe/jobs/job-expired/result"]; ran {
+		t.Error("an expired job must not run")
 	}
 }
 
