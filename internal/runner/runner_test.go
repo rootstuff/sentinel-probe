@@ -134,7 +134,7 @@ func newTestRunner(t *testing.T, f *fakeControl, dir string) *Runner {
 	t.Helper()
 	r, err := New(Config{
 		Region: "test", Version: "test", DataDir: dir, Concurrency: 10,
-		SyncInterval: 200 * time.Millisecond, TickInterval: 200 * time.Millisecond, PostInterval: 100 * time.Millisecond,
+		SyncInterval: 200 * time.Millisecond, TickInterval: 200 * time.Millisecond, PostInterval: 100 * time.Millisecond, JobPollInterval: 50 * time.Millisecond,
 		BatchSize: 100, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Phase: func(int64) int64 { return 0 }, AllowPrivate: true,
 	}, control.New(f.srv.URL, "spn_test", "test"))

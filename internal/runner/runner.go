@@ -42,6 +42,8 @@ type Config struct {
 	SyncInterval time.Duration
 	TickInterval time.Duration
 	PostInterval time.Duration
+	// JobPollInterval is the pause after an empty job poll; tests shorten it.
+	JobPollInterval time.Duration
 	BatchSize    int
 	Log          *slog.Logger
 	// AlignTicks waits for the next 30s grid slot before the first tick
@@ -257,9 +259,15 @@ func (r *Runner) monitorCount() int {
 
 // ---- on-demand jobs
 
-// jobs long-polls the control plane for on-demand checks and runs each
-// the moment it arrives: a customer's live check or the homepage hero is
-// waiting on the answer. A failed wait backs off; a cancelled context
+// JobPollInterval is the pause after an empty answer. The control plane
+// answers at once rather than holding a PHP worker open for the node, so
+// the node paces itself: an on-demand check still starts within a couple
+// of seconds of being asked for.
+const JobPollInterval = 2 * time.Second
+
+// jobs polls the control plane for on-demand checks and runs each the
+// moment it arrives: a customer's live check or the homepage hero is
+// waiting on the answer. A failed poll backs off; a cancelled context
 // ends the loop.
 func (r *Runner) jobs(ctx context.Context) {
 	backoff := time.Second
@@ -282,6 +290,11 @@ func (r *Runner) jobs(ctx context.Context) {
 		}
 		backoff = time.Second
 		if job == nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(r.jobPollInterval()):
+			}
 			continue
 		}
 		r.wg.Add(1)
@@ -290,6 +303,13 @@ func (r *Runner) jobs(ctx context.Context) {
 			r.runJob(ctx, job)
 		}(job)
 	}
+}
+
+func (r *Runner) jobPollInterval() time.Duration {
+	if r.cfg.JobPollInterval > 0 {
+		return r.cfg.JobPollInterval
+	}
+	return JobPollInterval
 }
 
 // runJob is the probe's /api/check-status: an ephemeral GET with the
