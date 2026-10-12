@@ -146,7 +146,10 @@ func httpError(resp *http.Response) error {
 // Job is an on-demand check the control plane left for this region: a
 // customer's live check, the homepage hero, an agent's check_url.
 type Job struct {
-	ID           string `json:"id"`
+	ID string `json:"id"`
+	// MonitorID set: run that monitor's own manifest rows now ("check now");
+	// the result lands like a scheduled check and nothing is posted here.
+	MonitorID    int64  `json:"monitor_id,omitempty"`
 	URL          string `json:"url"`
 	Timeout      int    `json:"timeout"`
 	SourceRegion string `json:"source_region"`

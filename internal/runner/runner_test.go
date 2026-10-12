@@ -413,6 +413,48 @@ func TestOnDemandJobRunsOnArrivalAndPostsItsResult(t *testing.T) {
 	}
 }
 
+func TestCheckNowRunsTheMonitorRowOutOfCadence(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }))
+	defer target.Close()
+	f := newFakeControl(t, target.URL)
+	// Monitor 42 is listed; 777 is not.
+	f.jobs = []map[string]any{
+		{"id": "run-1", "monitor_id": 42, "expires_at": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)},
+		{"id": "run-2", "monitor_id": 777, "expires_at": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)},
+	}
+	r := newTestRunner(t, f, t.TempDir())
+	r.cfg.TickInterval = time.Hour // the first tick runs everything once; nothing after
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	// First tick: 2 rows (42 http + 7 port). Then the check-now: 42 again.
+	waitFor(t, 8*time.Second, func() bool { return f.postedCount() >= 3 })
+	cancel()
+	<-done
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n42, total := 0, 0
+	for _, batch := range f.posted {
+		for _, it := range batch {
+			total++
+			if it["monitor_id"].(float64) == 42 {
+				n42++
+			}
+		}
+	}
+	if n42 != 2 {
+		t.Errorf("monitor 42 should have its tick check plus one check-now, got %d", n42)
+	}
+	if total != 3 {
+		t.Errorf("an unlisted monitor must not run, posted %d", total)
+	}
+	if len(f.jobResults) != 0 {
+		t.Errorf("a check-now posts no job result: %v", f.jobResults)
+	}
+}
+
 func TestStablePhaseMatchesPHP(t *testing.T) {
 	// 6 + (id * 2654435761) % 15, as DispatchCadence::stablePhase computes it.
 	cases := map[int64]int64{1: 6 + (2654435761 % 15), 2: 6 + (2*2654435761)%15, 237: 6 + (237*2654435761)%15}

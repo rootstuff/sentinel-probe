@@ -296,6 +296,10 @@ func (r *Runner) runJob(ctx context.Context, job *control.Job) {
 		r.log.Info("on-demand job expired before it ran", "job", job.ID)
 		return
 	}
+	if job.MonitorID != 0 {
+		r.runMonitorNow(ctx, job.MonitorID)
+		return
+	}
 	select {
 	case r.sem <- struct{}{}:
 	case <-ctx.Done():
@@ -329,6 +333,33 @@ func (r *Runner) runJob(ctx context.Context, job *control.Job) {
 	if err := r.client.PostJobResult(pctx, job.ID, result); err != nil {
 		r.log.Warn("on-demand result not delivered", "job", job.ID, "error", err)
 	}
+}
+
+// runMonitorNow executes a monitor's check rows (http, ping or port; not
+// its sub-checks) out of cadence and stamps them so the next tick does
+// not repeat them. A monitor this node does not list is ignored.
+func (r *Runner) runMonitorNow(ctx context.Context, id int64) {
+	r.mu.Lock()
+	var rows []manifest.Monitor
+	if r.manifest != nil {
+		slot := slotOf(time.Now())
+		for _, m := range r.manifest.Monitors {
+			k := keyOf(m)
+			if m.ID == id && (k.typ == "http" || k.typ == "ping" || k.typ == "port") {
+				rows = append(rows, m)
+				r.stamps[k] = slot
+			}
+		}
+	}
+	r.mu.Unlock()
+	if len(rows) == 0 {
+		r.log.Info("check-now for a monitor this node does not list", "monitor", id)
+		return
+	}
+	for _, m := range rows {
+		r.execute(ctx, m)
+	}
+	r.log.Info("checked on request", "monitor", id)
 }
 
 // ---- cadence (DispatchCadence.php, kept identical)
