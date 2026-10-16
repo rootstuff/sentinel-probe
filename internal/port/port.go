@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rootstuff/sentinel-probe/internal/guard"
 	"github.com/rootstuff/sentinel-probe/internal/target"
 )
 
@@ -23,15 +24,19 @@ type Result struct {
 
 func offline(msg string) Result { return Result{Status: "offline", Error: &msg} }
 
-// Run connects to the monitor's host and port.
-func Run(ctx context.Context, rawTarget string, port int) Result {
+// Run connects to the monitor's host and port, at the address the guard
+// pins (the first IPv4 when there is one), so the port check and the HTTP
+// check of one host reach the same server. AllowPrivate is for local
+// benchmarking only.
+func Run(ctx context.Context, rawTarget string, port int, allowPrivate bool) Result {
 	host := target.ExtractHost(rawTarget)
 	if host == "" {
 		return offline("Invalid host on monitor")
 	}
 	// PortService refuses private and loopback targets before validating
 	// the name, and lets an unresolvable name through to the connect.
-	if !target.Public(ctx, host, true) {
+	ip, err := guard.Pin(ctx, host, allowPrivate)
+	if err == guard.ErrNotPublic {
 		return offline("Cannot monitor private or loopback addresses")
 	}
 	if !target.IsValidHost(host) {
@@ -40,10 +45,13 @@ func Run(ctx context.Context, rawTarget string, port int) Result {
 	if port < 1 || port > 65535 {
 		return offline("Invalid port on monitor")
 	}
+	if err != nil {
+		return offline("DNS resolution failed")
+	}
 
 	d := net.Dialer{Timeout: ConnectTimeout}
 	start := time.Now()
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
 	if err != nil {
 		return offline(Simplify(err))
 	}

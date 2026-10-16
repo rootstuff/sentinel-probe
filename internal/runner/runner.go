@@ -44,8 +44,8 @@ type Config struct {
 	PostInterval time.Duration
 	// JobPollInterval is the pause after an empty job poll; tests shorten it.
 	JobPollInterval time.Duration
-	BatchSize    int
-	Log          *slog.Logger
+	BatchSize       int
+	Log             *slog.Logger
 	// AlignTicks waits for the next 30s grid slot before the first tick
 	// (what a node does); tests turn it off.
 	AlignTicks bool
@@ -517,7 +517,7 @@ func (r *Runner) execute(ctx context.Context, m manifest.Monitor) {
 		if m.Port != nil {
 			p = *m.Port
 		}
-		result = port.Run(context.Background(), m.URL, p)
+		result = port.Run(context.Background(), m.URL, p, r.cfg.AllowPrivate)
 	default: // http (keywords and assertions are judged on the control plane)
 		if !r.robots.Allowed(context.Background(), m.URL) {
 			// As MonitorCheckService does: a robots-blocked target reads as

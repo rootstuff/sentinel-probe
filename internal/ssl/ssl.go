@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/rootstuff/sentinel-probe/internal/check"
+	"github.com/rootstuff/sentinel-probe/internal/guard"
 	"github.com/rootstuff/sentinel-probe/internal/port"
-	"github.com/rootstuff/sentinel-probe/internal/target"
 )
 
 const HandshakeTimeout = 10 * time.Second
@@ -39,7 +39,11 @@ func failed(msg string) Facts { return Facts{Error: &msg} }
 func str(s string) *string { return &s }
 
 // Run connects to the URL's host and port (443 by default) and reads the
-// certificate it presents.
+// certificate it presents. The host is pinned through the guard, so the
+// certificate comes from the same address the HTTP check talks to: the
+// first IPv4 when there is one. Dialling by name let Go prefer a node's
+// global IPv6, and a reset on that path once opened an SSL incident on a
+// site whose IPv4 was answering 200 from the same box.
 func Run(ctx context.Context, rawURL string, allowPrivate bool) Facts {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Hostname() == "" {
@@ -50,13 +54,17 @@ func Run(ctx context.Context, rawURL string, allowPrivate bool) Facts {
 	if p == "" {
 		p = "443"
 	}
-	if !allowPrivate && !target.Public(ctx, host, true) {
+	ip, err := guard.Pin(ctx, host, allowPrivate)
+	if err == guard.ErrNotPublic {
 		return failed("SSL connection failed: cannot monitor private or loopback addresses")
+	}
+	if err != nil {
+		return failed("SSL connection failed: DNS resolution failed")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, HandshakeTimeout)
 	defer cancel()
-	raw, err := (&net.Dialer{Timeout: HandshakeTimeout}).DialContext(ctx, "tcp", net.JoinHostPort(host, p))
+	raw, err := (&net.Dialer{Timeout: HandshakeTimeout}).DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), p))
 	if err != nil {
 		return failed("SSL connection failed: " + port.Simplify(err))
 	}

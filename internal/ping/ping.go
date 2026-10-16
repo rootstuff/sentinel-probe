@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rootstuff/sentinel-probe/internal/guard"
 	"github.com/rootstuff/sentinel-probe/internal/target"
 )
 
@@ -42,16 +43,20 @@ func Run(ctx context.Context, rawTarget string) Result {
 	if host == "" || !target.IsValidHost(host) {
 		return offline("Invalid host in monitor URL")
 	}
-	if !target.Public(ctx, host, false) {
+	// The pinned address (the first IPv4 when there is one) rather than the
+	// name, so ping measures the same server the HTTP check talks to instead
+	// of whichever family the resolver lists first.
+	ip, err := guard.Pin(ctx, host, false)
+	if err != nil {
 		return offline("Target host is not publicly routable")
 	}
 
 	cctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "ping", "-c", strconv.Itoa(PacketCount), host)
+	cmd := exec.CommandContext(cctx, "ping", "-c", strconv.Itoa(PacketCount), ip.String())
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 
 	if errors.Is(cctx.Err(), context.DeadlineExceeded) {
 		return offline("Ping timed out")

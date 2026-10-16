@@ -113,7 +113,7 @@ func runCheck(args []string) {
 		enc.Encode(ping.Run(context.Background(), fs.Arg(0)))
 		return
 	case "port":
-		enc.Encode(port.Run(context.Background(), fs.Arg(0), *portNum))
+		enc.Encode(port.Run(context.Background(), fs.Arg(0), *portNum, *allowPrivate))
 		return
 	}
 
