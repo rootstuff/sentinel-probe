@@ -1,5 +1,5 @@
 // Package runner is the probe's long-running loop: sync the manifest,
-// tick every 30 seconds with the PHP edge's exact cadence, run the checks
+// tick every 15 seconds with the control plane's exact cadence, run the checks
 // that are due with bounded concurrency, spool the results and post them
 // in batches. Autonomy is not a mode: an unreachable control plane means
 // the cached manifest keeps scheduling and the spool keeps growing.
@@ -46,7 +46,7 @@ type Config struct {
 	JobPollInterval time.Duration
 	BatchSize       int
 	Log             *slog.Logger
-	// AlignTicks waits for the next 30s grid slot before the first tick
+	// AlignTicks waits for the next grid slot before the first tick
 	// (what a node does); tests turn it off.
 	AlignTicks bool
 	// Phase computes a monitor's execution delay within the slot; nil means
@@ -87,7 +87,7 @@ func New(cfg Config, client *control.Client) (*Runner, error) {
 		cfg.SyncInterval = 10 * time.Second
 	}
 	if cfg.TickInterval <= 0 {
-		cfg.TickInterval = 30 * time.Second
+		cfg.TickInterval = TickSeconds * time.Second
 	}
 	if cfg.PostInterval <= 0 {
 		cfg.PostInterval = 5 * time.Second
@@ -403,7 +403,11 @@ func keyOf(m manifest.Monitor) rowKey {
 	return rowKey{typ: typ, id: m.ID}
 }
 
-func slotOf(t time.Time) int64 { return t.Unix() / 30 * 30 }
+// TickSeconds is the grid every node and every dispatcher ticks on, and
+// the fastest interval a monitor can run at (DispatchCadence::TICK_SECONDS).
+const TickSeconds = 15
+
+func slotOf(t time.Time) int64 { return t.Unix() / TickSeconds * TickSeconds }
 
 // StablePhase is DispatchCadence::stablePhase: 6-20s, constant per monitor.
 func StablePhase(id int64) int64 { return 6 + int64((uint64(id)*2654435761)%15) }
@@ -413,7 +417,7 @@ func (r *Runner) isDue(m manifest.Monitor, now time.Time) bool {
 	if interval <= 0 {
 		interval = 60
 	}
-	// Slots, not seconds: a node ticks on the 30s grid, so the next tick
+	// Slots, not seconds: a node ticks on the 15s grid, so the next tick
 	// after a stamp is a full slot later; measuring from mid-slot (a test
 	// ticking every 200ms) would re-dispatch in a slot's last five seconds.
 	if stamp, ok := r.stamps[keyOf(m)]; ok {
@@ -426,9 +430,9 @@ func (r *Runner) isDue(m manifest.Monitor, now time.Time) bool {
 }
 
 func (r *Runner) ticks(ctx context.Context) {
-	// Align to the 30s grid like the edge daemon, then tick on it.
+	// Align to the grid the control plane dispatches on, then tick on it.
 	if r.cfg.AlignTicks {
-		first := time.Until(time.Unix(slotOf(time.Now())+30, 0))
+		first := time.Until(time.Unix(slotOf(time.Now())+TickSeconds, 0))
 		select {
 		case <-ctx.Done():
 			return

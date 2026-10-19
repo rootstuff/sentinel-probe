@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rootstuff/sentinel-probe/internal/control"
+	"github.com/rootstuff/sentinel-probe/internal/manifest"
 )
 
 // fakeControl is the two probe endpoints with recording and a kill switch.
@@ -464,6 +465,42 @@ func TestStablePhaseMatchesPHP(t *testing.T) {
 		}
 		if p := StablePhase(id); p < 6 || p > 20 {
 			t.Errorf("phase out of range: %d", p)
+		}
+	}
+}
+
+func TestFifteenSecondGrid(t *testing.T) {
+	if TickSeconds != 15 {
+		t.Fatalf("grid is %d, want 15", TickSeconds)
+	}
+	r := &Runner{stamps: map[rowKey]int64{}}
+	at := time.Unix(1_700_000_040, 0)
+	if slotOf(at.Add(14*time.Second)) != 1_700_000_040 || slotOf(at.Add(15*time.Second)) != 1_700_000_055 {
+		t.Fatal("slots are not 15 seconds wide")
+	}
+	fast := manifest.Monitor{ID: 1, IntervalSeconds: 15}
+	slow := manifest.Monitor{ID: 2, IntervalSeconds: 30}
+	minute := manifest.Monitor{ID: 3, IntervalSeconds: 60}
+	for _, m := range []manifest.Monitor{fast, slow, minute} {
+		r.stamps[keyOf(m)] = slotOf(at)
+	}
+	// One slot later only the 15s monitor is due; two slots later the 30s one
+	// joins it; the 1-minute monitor waits for four.
+	for _, c := range []struct {
+		after int
+		fast  bool
+		slow  bool
+		min   bool
+	}{{15, true, false, false}, {30, true, true, false}, {45, true, false, false}, {60, true, true, true}} {
+		now := at.Add(time.Duration(c.after) * time.Second)
+		if r.isDue(fast, now) != c.fast || r.isDue(slow, now) != c.slow || r.isDue(minute, now) != c.min {
+			t.Errorf("at +%ds: fast=%v slow=%v minute=%v", c.after, r.isDue(fast, now), r.isDue(slow, now), r.isDue(minute, now))
+		}
+		// A tick stamps what it dispatches, as tick() does.
+		for _, m := range []manifest.Monitor{fast, slow, minute} {
+			if r.isDue(m, now) {
+				r.stamps[keyOf(m)] = slotOf(now)
+			}
 		}
 	}
 }
