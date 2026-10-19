@@ -35,6 +35,11 @@ const (
 	MaxBodyBytes = 10 << 20
 	// CaptureBodyBytes caps what travels back to the control plane.
 	CaptureBodyBytes = 2 << 20
+	// DiagnosisBodyBytes is how much of a failed page travels back with
+	// its headers for every monitor, so the control plane can say what the
+	// failure is (a WordPress fatal, a parked domain) without the body
+	// being asked for.
+	DiagnosisBodyBytes = 64 << 10
 )
 
 // Options describes one check. Zero values take the monitor defaults.
@@ -85,7 +90,8 @@ type Result struct {
 	Hops         int     `json:"hops"`
 	BodyBytes    int64   `json:"body_bytes"`
 	Proto        string  `json:"proto,omitempty"`
-	// Set only with Options.CaptureBody.
+	// Set with Options.CaptureBody, and on any final response whose status
+	// was not accepted (then the body is the first DiagnosisBodyBytes).
 	Headers       map[string][]string `json:"headers,omitempty"`
 	BodyB64       string              `json:"body_b64,omitempty"`
 	BodyTruncated bool                `json:"body_truncated,omitempty"`
@@ -189,11 +195,11 @@ func Run(ctx context.Context, o Options) Result {
 		if o.BodySink != nil {
 			sink = o.BodySink
 		}
-		var capture *limitedBuffer
+		capture := &limitedBuffer{limit: DiagnosisBodyBytes}
 		if o.CaptureBody {
 			capture = &limitedBuffer{limit: CaptureBodyBytes}
-			sink = io.MultiWriter(sink, capture)
 		}
+		sink = io.MultiWriter(sink, capture)
 		decoded, decErr := decodeBody(resp)
 		var n int64
 		readErr := decErr
@@ -214,7 +220,7 @@ func Run(ctx context.Context, o Options) Result {
 		location := resp.Header.Get("Location")
 
 		if !*o.FollowRedirects || !isRedirect(code) || location == "" {
-			if capture != nil {
+			if o.CaptureBody || !statusAccepted(code, o.AcceptedCodes) {
 				res.Headers = resp.Header.Clone()
 				res.BodyB64 = base64.StdEncoding.EncodeToString(capture.buf)
 				res.BodyTruncated = capture.truncated

@@ -3,6 +3,7 @@ package check
 import (
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -187,6 +188,35 @@ func TestCaptureBodyAndHeaders(t *testing.T) {
 	}
 	if r2 := run(t, Options{URL: s.URL}); r2.Headers != nil || r2.BodyB64 != "" {
 		t.Fatalf("no capture by default: %+v", r2)
+	}
+}
+
+func TestFailedResponseCarriesHeadersAndTheStartOfThePage(t *testing.T) {
+	s := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Expires", "Wed, 11 Jan 1984 05:00:00 GMT")
+		w.WriteHeader(500)
+		w.Write([]byte("<html><body>Internal Server Error</body></html>"))
+	})
+	r := run(t, Options{URL: s.URL})
+	if r.Status != "offline" || r.Headers["Expires"][0] != "Wed, 11 Jan 1984 05:00:00 GMT" {
+		t.Fatalf("failed response without headers: %+v", r)
+	}
+	body, _ := base64.StdEncoding.DecodeString(r.BodyB64)
+	if string(body) != "<html><body>Internal Server Error</body></html>" || r.BodyTruncated {
+		t.Fatalf("failed response body: %q truncated=%v", body, r.BodyTruncated)
+	}
+
+	big := make([]byte, DiagnosisBodyBytes+10)
+	s2 := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+		w.Write(big)
+	})
+	r2 := run(t, Options{URL: s2.URL})
+	if !r2.BodyTruncated || r2.BodyBytes != int64(len(big)) {
+		t.Fatalf("diagnosis slice: truncated=%v bytes=%d", r2.BodyTruncated, r2.BodyBytes)
+	}
+	if decoded, _ := base64.StdEncoding.DecodeString(r2.BodyB64); len(decoded) != DiagnosisBodyBytes {
+		t.Fatalf("diagnosis slice length: %d", len(decoded))
 	}
 }
 
