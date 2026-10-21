@@ -81,6 +81,12 @@ type Ack struct {
 // Redis is unreachable mid-batch: the acked items are final, the rest wait.
 var ErrStorageUnavailable = errors.New("control plane storage unavailable")
 
+// ErrTooLarge is nginx's 413 in front of the control plane: the batch as a
+// whole was refused, nothing in it was looked at. The poster halves the
+// batch and tries again rather than retrying the same request forever
+// (Sydney wedged on one such batch for an hour on 2026-10-21).
+var ErrTooLarge = errors.New("control plane refused the batch as too large")
+
 // PostResults sends a batch. On 503 the returned Ack still lists what was
 // accepted before the control plane gave up, with ErrStorageUnavailable.
 func (c *Client) PostResults(ctx context.Context, items []spool.Item) (*Ack, error) {
@@ -117,6 +123,8 @@ func (c *Client) PostResults(ctx context.Context, items []spool.Item) (*Ack, err
 		return &ack, nil
 	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
+	case http.StatusRequestEntityTooLarge:
+		return nil, ErrTooLarge
 	default:
 		return nil, httpError(resp)
 	}

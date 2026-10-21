@@ -14,6 +14,7 @@ import (
 
 	"github.com/rootstuff/sentinel-probe/internal/control"
 	"github.com/rootstuff/sentinel-probe/internal/manifest"
+	"github.com/rootstuff/sentinel-probe/internal/spool"
 )
 
 // fakeControl is the two probe endpoints with recording and a kill switch.
@@ -25,7 +26,8 @@ type fakeControl struct {
 	posted    [][]map[string]any
 	tokens    []string
 	etags     []string
-	down      atomic.Bool // results answer 503 with nothing accepted
+	down      atomic.Bool  // results answer 503 with nothing accepted
+	maxBody   atomic.Int64 // when set, a results body over this many bytes answers 413 like nginx
 	srv       *httptest.Server
 	manifest  func() map[string]any
 	tag       string // the ETag the fake currently serves; a sync carrying it is a 304
@@ -101,6 +103,11 @@ func newFakeControl(t *testing.T, target string) *fakeControl {
 			Results []map[string]any `json:"results"`
 		}
 		b, _ := io.ReadAll(r.Body)
+		if limit := f.maxBody.Load(); limit > 0 && int64(len(b)) > limit {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			w.Write([]byte("<html><head><title>413 Request Entity Too Large</title></head></html>"))
+			return
+		}
 		json.Unmarshal(b, &body)
 		if f.down.Load() {
 			w.WriteHeader(503)
@@ -119,6 +126,22 @@ func newFakeControl(t *testing.T, target string) *fakeControl {
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// encodedBatch is the request body the client would send for these items.
+func (f *fakeControl) encodedBatch(items []spool.Item) []byte {
+	type wire struct {
+		MonitorID int64           `json:"monitor_id"`
+		Type      string          `json:"type,omitempty"`
+		CheckedAt string          `json:"checked_at"`
+		Result    json.RawMessage `json:"result"`
+	}
+	results := make([]wire, len(items))
+	for i, it := range items {
+		results[i] = wire{it.MonitorID, it.Type, it.CheckedAt.UTC().Format(time.RFC3339), it.Result}
+	}
+	b, _ := json.Marshal(map[string]any{"results": results})
+	return b
 }
 
 func (f *fakeControl) postedCount() int {
@@ -502,5 +525,54 @@ func TestFifteenSecondGrid(t *testing.T) {
 				r.stamps[keyOf(m)] = slotOf(now)
 			}
 		}
+	}
+}
+
+// A control plane behind an nginx with a small client_max_body_size answers
+// 413 for a batch as a whole. The poster must shrink the batch rather than
+// retry the same request forever, and a single result that is too large on
+// its own must be dropped so the queue behind it moves.
+func TestTooLargeBatchShrinksAndOversizedResultIsDropped(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }))
+	defer target.Close()
+	f := newFakeControl(t, target.URL)
+	dir := t.TempDir()
+	r := newTestRunner(t, f, dir)
+
+	// Four results in the spool, each about 300 bytes on the wire.
+	for i := 0; i < 4; i++ {
+		if err := r.spool.Add(42, time.Now(), map[string]any{"status": "online", "response_time": 100 + i, "status_code": 200, "error": nil}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	one := len(f.encodedBatch(r.spool.Take(1)))
+	f.maxBody.Store(int64(one + one/2)) // one fits, two do not
+
+	if !r.post(context.Background()) {
+		t.Fatal("post reported failure")
+	}
+	if f.postedCount() != 4 {
+		t.Fatalf("expected all 4 results posted one at a time, got %d", f.postedCount())
+	}
+	if r.spool.Len() != 0 {
+		t.Fatalf("spool should be empty, has %d", r.spool.Len())
+	}
+	if r.postLimit < 2 {
+		t.Fatalf("post limit should grow back after successes, is %d", r.postLimit)
+	}
+
+	// A single result bigger than the limit on its own is dropped, not retried.
+	f.maxBody.Store(int64(one - 10))
+	if err := r.spool.Add(42, time.Now(), map[string]any{"status": "online", "response_time": 7, "status_code": 200, "error": nil}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.post(context.Background()) {
+		t.Fatal("post reported failure")
+	}
+	if r.spool.Len() != 0 {
+		t.Fatalf("oversized result should have been dropped, spool has %d", r.spool.Len())
+	}
+	if f.postedCount() != 4 {
+		t.Fatalf("the dropped result must not have been accepted, posted %d", f.postedCount())
 	}
 }

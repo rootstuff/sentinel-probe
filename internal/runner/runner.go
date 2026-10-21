@@ -59,9 +59,14 @@ type Config struct {
 type Runner struct {
 	cfg    Config
 	client *control.Client
-	store  *manifest.Store
-	spool  *spool.Spool
-	log    *slog.Logger
+	// postLimit is how many results the next post carries: BatchSize until
+	// the control plane answers 413, then halved down to one, and doubled
+	// back up as posts succeed.
+	postLimit int
+	trimmed   bool // the last batch was cut by the size cap, so the spool may still hold more
+	store     *manifest.Store
+	spool     *spool.Spool
+	log       *slog.Logger
 
 	mu       sync.Mutex
 	manifest *manifest.Manifest
@@ -118,6 +123,7 @@ func New(cfg Config, client *control.Client) (*Runner, error) {
 		robots:     robots.New(cfg.AllowPrivate),
 		vitals:     sysinfo.NewSampler(cfg.DataDir),
 	}
+	r.postLimit = cfg.BatchSize
 	if m, err := r.store.Load(); err != nil {
 		r.log.Warn("cached manifest unreadable", "error", err)
 	} else if m != nil {
@@ -607,16 +613,19 @@ func (r *Runner) poster(ctx context.Context) {
 // Returns false when the control plane could not be reached or refused.
 func (r *Runner) post(ctx context.Context) bool {
 	for {
-		items := r.spool.Take(r.cfg.BatchSize)
+		limit := r.postLimit
+		items := r.spool.Take(limit)
 		if len(items) == 0 {
 			return true
 		}
 		// Captured bodies make results big; keep a request under ~4 MB.
 		size := 0
+		r.trimmed = false
 		for i, it := range items {
 			size += len(it.Result)
 			if size > 4<<20 && i > 0 {
 				items = items[:i]
+				r.trimmed = true
 				break
 			}
 		}
@@ -642,6 +651,20 @@ func (r *Runner) post(ctx context.Context) bool {
 			}
 		}
 		if err != nil {
+			if errors.Is(err, control.ErrTooLarge) {
+				if len(items) > 1 {
+					// The batch, not any one result, was too big: post fewer
+					// at a time. No backoff: the next, smaller post is the retry.
+					r.postLimit = max(1, len(items)/2)
+					r.log.Warn("control plane refused the batch as too large; posting fewer at a time", "was", len(items), "now", r.postLimit, "pending", r.spool.Len())
+					continue
+				}
+				// One result on its own is over the limit: nothing smaller to
+				// try. Drop it so everything queued behind it can move.
+				r.spool.Ack([]uint64{items[0].Seq})
+				r.log.Error("result too large for the control plane; dropped", "monitor_id", items[0].MonitorID, "bytes", len(items[0].Result), "checked_at", items[0].CheckedAt)
+				continue
+			}
 			if errors.Is(err, control.ErrStorageUnavailable) {
 				r.log.Warn("control plane storage unavailable; results stay spooled", "pending", r.spool.Len())
 			} else {
@@ -649,7 +672,12 @@ func (r *Runner) post(ctx context.Context) bool {
 			}
 			return false
 		}
-		if len(items) < r.cfg.BatchSize {
+		if r.postLimit < r.cfg.BatchSize {
+			r.postLimit = min(r.cfg.BatchSize, r.postLimit*2)
+		}
+		// Fewer than asked for means the spool is drained; a size-trimmed
+		// batch is not, so compare against what was asked for, not sent.
+		if len(items) < limit && !r.trimmed {
 			return true
 		}
 	}
