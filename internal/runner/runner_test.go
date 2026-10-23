@@ -611,9 +611,9 @@ func TestSpreadDelayWaitsTheSeatOnlyForSpreadRuns(t *testing.T) {
 		want   time.Duration
 	}{
 		{true, 0, 0},
-		{true, 7, 7 * time.Second},
-		{true, 14, 14 * time.Second},
-		{true, 40, 14 * time.Second},
+		{true, 7, 1400 * time.Millisecond},
+		{true, 14, 2800 * time.Millisecond}, // the whole spread fits in about 3 s
+		{true, 40, 2800 * time.Millisecond},
 		{false, 7, 0}, // a verification burst runs at once
 	}
 	for _, c := range cases {

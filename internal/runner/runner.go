@@ -311,15 +311,17 @@ func (r *Runner) jobs(ctx context.Context) {
 	}
 }
 
-// SpreadDelay is how long a "check now" waits before running: the region's
-// seat (0-14 seconds) when the control plane asked for a spread run, else
-// nothing. Manual checks used to reach the target from every region in the
-// same instant, the burst the scheduled checks stopped making in 1.5.0.
+// SpreadDelay is how long a "check now" waits before running: 200 ms per
+// seat when the control plane asked for a spread run, so fifteen regions
+// arrive within about 3 s (roughly five requests a second) instead of in
+// the same instant. Scheduled checks use the full 15 s window; a manual
+// check is someone waiting for an answer, so it is compressed. Unspread
+// jobs (verification bursts) run at once.
 func SpreadDelay(spread bool, seat int) time.Duration {
 	if !spread || seat <= 0 {
 		return 0
 	}
-	return time.Duration(min(seat, 14)) * time.Second
+	return time.Duration(min(seat, 14)) * 200 * time.Millisecond
 }
 
 func (r *Runner) jobPollInterval() time.Duration {

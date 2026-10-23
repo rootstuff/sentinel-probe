@@ -162,9 +162,9 @@ type Job struct {
 	Timeout      int    `json:"timeout"`
 	SourceRegion string `json:"source_region"`
 	ExpiresAt    string `json:"expires_at"`
-	// Spread: a manual "check now" waits this region's seat on the tick
-	// before running, so the regions reach the target a second apart. A
-	// verification burst leaves it unset and runs at once.
+	// Spread: a manual "check now" waits 200 ms per seat before running,
+	// so the regions reach the target within about 3 s instead of all at
+	// once. A verification burst leaves it unset and runs at once.
 	Spread bool `json:"spread,omitempty"`
 }
 
