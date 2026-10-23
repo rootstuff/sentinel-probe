@@ -603,3 +603,22 @@ func TestRegionPhaseSpreadsTheRegionsOfOneMonitor(t *testing.T) {
 		t.Errorf("zero phase moved to %d", got)
 	}
 }
+
+func TestSpreadDelayWaitsTheSeatOnlyForSpreadRuns(t *testing.T) {
+	cases := []struct {
+		spread bool
+		seat   int
+		want   time.Duration
+	}{
+		{true, 0, 0},
+		{true, 7, 7 * time.Second},
+		{true, 14, 14 * time.Second},
+		{true, 40, 14 * time.Second},
+		{false, 7, 0}, // a verification burst runs at once
+	}
+	for _, c := range cases {
+		if got := SpreadDelay(c.spread, c.seat); got != c.want {
+			t.Errorf("SpreadDelay(%v, %d) = %v, want %v", c.spread, c.seat, got, c.want)
+		}
+	}
+}

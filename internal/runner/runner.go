@@ -311,6 +311,17 @@ func (r *Runner) jobs(ctx context.Context) {
 	}
 }
 
+// SpreadDelay is how long a "check now" waits before running: the region's
+// seat (0-14 seconds) when the control plane asked for a spread run, else
+// nothing. Manual checks used to reach the target from every region in the
+// same instant, the burst the scheduled checks stopped making in 1.5.0.
+func SpreadDelay(spread bool, seat int) time.Duration {
+	if !spread || seat <= 0 {
+		return 0
+	}
+	return time.Duration(min(seat, 14)) * time.Second
+}
+
 func (r *Runner) jobPollInterval() time.Duration {
 	if r.cfg.JobPollInterval > 0 {
 		return r.cfg.JobPollInterval
@@ -326,6 +337,19 @@ func (r *Runner) runJob(ctx context.Context, job *control.Job) {
 		return
 	}
 	if job.MonitorID != 0 {
+		r.mu.Lock()
+		seat := 0
+		if r.manifest != nil {
+			seat = r.manifest.PhaseOffset
+		}
+		r.mu.Unlock()
+		if d := SpreadDelay(job.Spread, seat); d > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(d):
+			}
+		}
 		r.runMonitorNow(ctx, job.MonitorID)
 		return
 	}
