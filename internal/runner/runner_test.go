@@ -576,3 +576,30 @@ func TestTooLargeBatchShrinksAndOversizedResultIsDropped(t *testing.T) {
 		t.Fatalf("the dropped result must not have been accepted, posted %d", f.postedCount())
 	}
 }
+
+func TestRegionPhaseSpreadsTheRegionsOfOneMonitor(t *testing.T) {
+	// Fifteen regions, one monitor: every seat lands on its own second,
+	// all inside the 6-20s window, so no two regions hit the target at once.
+	for _, id := range []int64{1, 2, 237, 356} {
+		base := StablePhase(id)
+		seen := map[int64]bool{}
+		for seat := 0; seat < 15; seat++ {
+			p := RegionPhase(base, seat)
+			if p < 6 || p > 20 {
+				t.Fatalf("monitor %d seat %d: phase %d outside 6-20", id, seat, p)
+			}
+			if seen[p] {
+				t.Fatalf("monitor %d seat %d: phase %d shared with another seat", id, seat, p)
+			}
+			seen[p] = true
+		}
+	}
+	// An older control plane sends no seat: phases are unchanged.
+	if got := RegionPhase(StablePhase(237), 0); got != StablePhase(237) {
+		t.Errorf("seat 0 moved the phase: %d", got)
+	}
+	// A test's zero phase is left alone whatever the seat.
+	if got := RegionPhase(0, 7); got != 0 {
+		t.Errorf("zero phase moved to %d", got)
+	}
+}

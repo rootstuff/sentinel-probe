@@ -49,6 +49,10 @@ type Auth struct {
 type Manifest struct {
 	Region      string    `json:"region"`
 	GeneratedAt time.Time `json:"generated_at"`
+	// PhaseOffset is this region's seat on the tick, 0-14 seconds, so the
+	// regions checking one monitor arrive about a second apart instead of
+	// in the same instant. Absent (0) on an older control plane.
+	PhaseOffset int       `json:"phase_offset"`
 	Monitors    []Monitor `json:"monitors"`
 	// ETag is kept beside the body so a restart resumes with If-None-Match.
 	ETag string `json:"etag,omitempty"`

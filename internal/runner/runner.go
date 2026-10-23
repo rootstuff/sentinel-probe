@@ -418,6 +418,18 @@ func slotOf(t time.Time) int64 { return t.Unix() / TickSeconds * TickSeconds }
 // StablePhase is DispatchCadence::stablePhase: 6-20s, constant per monitor.
 func StablePhase(id int64) int64 { return 6 + int64((uint64(id)*2654435761)%15) }
 
+// RegionPhase shifts a monitor's phase by the region's seat, staying inside
+// the same 6-20s window. Every region used to compute the identical phase,
+// so all of a monitor's regions hit the target in the same instant: fifteen
+// simultaneous requests every interval took adambalee.com down at 15-second
+// checks (2026-10-21). With seats 0-14 the regions arrive a second apart.
+func RegionPhase(phase int64, offset int) int64 {
+	if offset == 0 || phase < 6 || phase > 20 {
+		return phase
+	}
+	return 6 + ((phase-6+int64(offset))%15+15)%15
+}
+
 func (r *Runner) isDue(m manifest.Monitor, now time.Time) bool {
 	interval := int64(m.IntervalSeconds)
 	if interval <= 0 {
@@ -476,10 +488,11 @@ func (r *Runner) tick(ctx context.Context) {
 		r.stamps = keep
 	}
 	evaluated := len(r.manifest.Monitors)
+	offset := r.manifest.PhaseOffset
 	r.mu.Unlock()
 
 	for _, m := range due {
-		runAt := time.Unix(slot+r.cfg.Phase(m.ID), 0)
+		runAt := time.Unix(slot+RegionPhase(r.cfg.Phase(m.ID), offset), 0)
 		r.wg.Add(1)
 		go func(m manifest.Monitor) {
 			defer r.wg.Done()
