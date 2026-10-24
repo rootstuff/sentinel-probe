@@ -359,8 +359,13 @@ func simplify(err error) string {
 	msg := err.Error()
 	// net.OpError prefixes "read tcp 10.0.0.2:51234->1.2.3.4:443:", which
 	// leaks the probe's own address and buries the cause; keep the cause.
+	// The dial op is remembered before the prefix goes: it is the only
+	// thing that tells a connect timeout from a slow response once the
+	// message is just "i/o timeout".
 	var operr *net.OpError
+	dialing := false
 	if errors.As(err, &operr) && operr.Err != nil {
+		dialing = operr.Op == "dial"
 		msg = operr.Err.Error()
 	}
 
@@ -380,7 +385,7 @@ func simplify(err error) string {
 		return "Connection reset by peer"
 	case strings.Contains(msg, "no such host"):
 		return "DNS resolution failed"
-	case errors.As(err, &netErr) && netErr.Timeout() && strings.Contains(msg, "dial tcp"):
+	case errors.As(err, &netErr) && netErr.Timeout() && (dialing || strings.Contains(msg, "dial tcp")):
 		return "Connection timeout"
 	case strings.Contains(msg, "TLS handshake timeout"):
 		return "Connection timeout"

@@ -4,8 +4,11 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"testing"
 	"time"
 )
@@ -226,5 +229,22 @@ func TestCaptureTruncatesLargeBodies(t *testing.T) {
 	r := run(t, Options{URL: s.URL, CaptureBody: true})
 	if !r.BodyTruncated || r.BodyBytes != int64(len(big)) {
 		t.Fatalf("truncation: truncated=%v bytes=%d", r.BodyTruncated, r.BodyBytes)
+	}
+}
+
+// A dial that times out reads "Connection timeout", not "Request timeout":
+// the OpError prefix that said "dial tcp" is stripped before matching, so
+// the op has to be read first. A timeout once connected stays a request
+// timeout. (A mainland China site unreachable from three regions showed
+// "Request timeout" at exactly the 10s connect budget, 2026-10-24.)
+func TestTimeoutWording(t *testing.T) {
+	wrap := func(op string) error {
+		return &url.Error{Op: "Get", URL: "https://example.com/", Err: &net.OpError{Op: op, Net: "tcp", Err: os.ErrDeadlineExceeded}}
+	}
+	if got := simplify(wrap("dial")); got != "Connection timeout" {
+		t.Fatalf("dial timeout: %q", got)
+	}
+	if got := simplify(wrap("read")); got != "Request timeout" {
+		t.Fatalf("read timeout: %q", got)
 	}
 }
