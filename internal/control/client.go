@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rootstuff/sentinel-probe/internal/manifest"
@@ -22,15 +23,73 @@ type Client struct {
 	Token     string
 	UserAgent string
 	HTTP      *http.Client
+
+	// mu guards HTTP, which do replaces after a transport failure.
+	mu sync.Mutex
 }
 
+// Health checks on the one HTTP/2 connection every control-plane request
+// shares. Go sends no pings by default, so a connection the network dropped
+// without a FIN or RST (a route flap between the node and Cloudflare) stays
+// "open" forever and every sync, result post and job wait times out on it
+// while a fresh connection would work: ca-central lost 25 minutes of results
+// that way on 2026-10-27 until the service was restarted.
+const (
+	// pingAfterIdle is how long a connection may go without a frame from
+	// the control plane before it is pinged.
+	pingAfterIdle = 15 * time.Second
+	// pingTimeout closes a connection whose ping goes unanswered.
+	pingTimeout = 10 * time.Second
+	// writeTimeout closes a connection that accepts no bytes for this long.
+	writeTimeout = 30 * time.Second
+)
+
 func New(baseURL, token, version string) *Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.HTTP2 = &http.HTTP2Config{
+		SendPingTimeout:  pingAfterIdle,
+		PingTimeout:      pingTimeout,
+		WriteByteTimeout: writeTimeout,
+	}
+
 	return &Client{
 		BaseURL:   strings.TrimRight(baseURL, "/"),
 		Token:     token,
 		UserAgent: "sentinel-probe/" + version,
-		HTTP:      &http.Client{Timeout: 60 * time.Second},
+		HTTP:      &http.Client{Timeout: 60 * time.Second, Transport: transport},
 	}
+}
+
+// do sends one request. A request that fails at the transport (a timeout, a
+// reset) retires the whole transport: the next request dials a new
+// connection instead of queueing on one that may be dead. Closing idle
+// connections is not enough, because the sync, the result post and the job
+// wait all hang on the same connection at once, so it is never idle. The old
+// connection closes once its requests time out or its ping goes unanswered.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	c.mu.Lock()
+	hc := c.HTTP
+	c.mu.Unlock()
+
+	resp, err := hc.Do(req)
+	if err != nil {
+		c.retire(hc)
+	}
+	return resp, err
+}
+
+// retire swaps in a fresh copy of the transport, once per failed client
+// (concurrent failures on the same one swap it a single time).
+func (c *Client) retire(failed *http.Client) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	old, ok := failed.Transport.(*http.Transport)
+	if c.HTTP != failed || !ok {
+		return
+	}
+	c.HTTP = &http.Client{Timeout: failed.Timeout, Transport: old.Clone()}
+	old.CloseIdleConnections()
 }
 
 // ErrUnauthorized means the token was refused: nothing to retry.
@@ -47,7 +106,7 @@ func (c *Client) Sync(ctx context.Context, etag, version string, status any) (*m
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +164,7 @@ func (c *Client) PostResults(ctx context.Context, items []spool.Item) (*Ack, err
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +234,7 @@ func (c *Client) WaitJob(ctx context.Context) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +262,7 @@ func (c *Client) PostJobResult(ctx context.Context, id string, result any) error
 	if err != nil {
 		return err
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return err
 	}
