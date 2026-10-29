@@ -2,6 +2,7 @@ package check
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"net"
 	"net/http"
@@ -145,7 +146,16 @@ type hopConn struct {
 	tcp   time.Duration
 	tls   time.Duration
 	proto string
+	// facts is the certificate and suite the handshake negotiated; hasFacts
+	// is false on plain http and when the handshake did not complete.
+	facts    TLSFacts
+	hasFacts bool
 }
+
+// rootCAs replaces the system roots when set; tests point it at the CA of
+// an httptest server so the HTTP check verifies that server's certificate
+// exactly as it verifies a public one.
+var rootCAs *x509.CertPool
 
 // connect dials the pinned address, performs the TLS handshake with the
 // OpenSSL-shaped ClientHello when the scheme is https, and returns a
@@ -203,7 +213,9 @@ func connect(ctx context.Context, u *url.URL, ip netip.Addr, connectTimeout time
 		return hc, err
 	}
 	hc.ready = time.Now()
-	hc.proto = uconn.ConnectionState().NegotiatedProtocol
+	state := uconn.ConnectionState()
+	hc.proto = state.NegotiatedProtocol
+	hc.facts, hc.hasFacts = TLSFactsFrom(state.PeerCertificates, state.Version, state.CipherSuite, u.Hostname())
 	hc.conn = uconn
 
 	if hc.proto == "h2" {
@@ -238,7 +250,7 @@ func SafeHandshake(ctx context.Context, raw net.Conn, serverName string, skipVer
 }
 
 func handshake(ctx context.Context, raw net.Conn, serverName string, spec *utls.ClientHelloSpec) (*utls.UConn, error) {
-	uconn := utls.UClient(raw, &utls.Config{ServerName: serverName}, utls.HelloCustom)
+	uconn := utls.UClient(raw, &utls.Config{ServerName: serverName, RootCAs: rootCAs}, utls.HelloCustom)
 	if err := uconn.ApplyPreset(spec); err != nil {
 		return nil, err
 	}
@@ -275,7 +287,7 @@ func handshakeStock(ctx context.Context, raw net.Conn, serverName string, http1O
 	if http1Only {
 		alpn = []string{"http/1.1"}
 	}
-	uconn := utls.UClient(raw, &utls.Config{ServerName: serverName, NextProtos: alpn}, utls.HelloGolang)
+	uconn := utls.UClient(raw, &utls.Config{ServerName: serverName, NextProtos: alpn, RootCAs: rootCAs}, utls.HelloGolang)
 	if err := uconn.HandshakeContext(ctx); err != nil {
 		return nil, err
 	}

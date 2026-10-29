@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/rootstuff/sentinel-probe/internal/check"
 	"github.com/rootstuff/sentinel-probe/internal/guard"
 )
 
@@ -19,7 +20,7 @@ func TestReadsLeafCertificateFacts(t *testing.T) {
 	if f.Error != nil {
 		t.Fatalf("error: %s", *f.Error)
 	}
-	want := srv.Certificate().NotAfter.UTC().Format(iso8601)
+	want := srv.Certificate().NotAfter.UTC().Format(check.ISO8601)
 	if f.NotAfter == nil || *f.NotAfter != want {
 		t.Errorf("not_after %v, want %s", f.NotAfter, want)
 	}

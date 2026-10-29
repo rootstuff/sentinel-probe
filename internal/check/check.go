@@ -90,6 +90,11 @@ type Result struct {
 	Hops         int     `json:"hops"`
 	BodyBytes    int64   `json:"body_bytes"`
 	Proto        string  `json:"proto,omitempty"`
+	// The certificate the URL's own host presented on the first hop, so the
+	// control plane judges SSL from the check it already made in every
+	// region instead of a separate handshake from one. Absent on plain http
+	// and when the handshake failed.
+	TLSFacts
 	// Set with Options.CaptureBody, and on any final response whose status
 	// was not accepted (then the body is the first DiagnosisBodyBytes).
 	Headers       map[string][]string `json:"headers,omitempty"`
@@ -100,6 +105,8 @@ type Result struct {
 type phases struct {
 	tcp, tls, ttfb time.Duration
 	proto          string
+	facts          TLSFacts
+	hasFacts       bool
 }
 
 func (o Options) withDefaults() Options {
@@ -184,6 +191,9 @@ func Run(ctx context.Context, o Options) Result {
 		res.TCPMs, res.TLSMs, res.TTFBMs = int(ph.tcp.Milliseconds()), int(ph.tls.Milliseconds()), int(ph.ttfb.Milliseconds())
 		if ph.proto != "" {
 			res.Proto = ph.proto
+		}
+		if hops == 0 && ph.hasFacts {
+			res.TLSFacts = ph.facts
 		}
 		if err != nil {
 			closeHop()
@@ -273,7 +283,7 @@ func doHop(ctx context.Context, hopTimeout, connectTimeout time.Duration, method
 		}
 		return nil, ph, noop, cancel, err
 	}
-	ph := phases{tcp: hc.tcp, tls: hc.tls, proto: hc.proto}
+	ph := phases{tcp: hc.tcp, tls: hc.tls, proto: hc.proto, facts: hc.facts, hasFacts: hc.hasFacts}
 
 	if hc.proto != "h2" {
 		resp, firstByte, err := roundTripH1(hctx, hc.conn, method, u, headers, body, jar)

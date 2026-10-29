@@ -6,10 +6,8 @@ package ssl
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/rootstuff/sentinel-probe/internal/check"
@@ -19,24 +17,14 @@ import (
 
 const HandshakeTimeout = 10 * time.Second
 
-// iso8601 prints UTC as +00:00, as Carbon's toIso8601String does.
-const iso8601 = "2006-01-02T15:04:05-07:00"
-
-// Facts is what the control plane's SSLMonitor::judge takes.
+// Facts is what the control plane's SSLMonitor::judge takes: the shared
+// certificate facts, or the error that stopped the handshake.
 type Facts struct {
-	Error         *string `json:"error,omitempty"`
-	NotBefore     *string `json:"not_before,omitempty"`
-	NotAfter      *string `json:"not_after,omitempty"`
-	Issuer        *string `json:"issuer,omitempty"`
-	Subject       *string `json:"subject,omitempty"`
-	TLSProtocol   *string `json:"tls_protocol,omitempty"`
-	TLSCipher     *string `json:"tls_cipher,omitempty"`
-	TLSCipherBits *int    `json:"tls_cipher_bits,omitempty"`
+	Error *string `json:"error,omitempty"`
+	check.TLSFacts
 }
 
 func failed(msg string) Facts { return Facts{Error: &msg} }
-
-func str(s string) *string { return &s }
 
 // Run connects to the URL's host and port (443 by default) and reads the
 // certificate it presents. The host is pinned through the guard, so the
@@ -78,64 +66,9 @@ func Run(ctx context.Context, rawURL string, allowPrivate bool) Facts {
 	defer conn.Close()
 
 	state := conn.ConnectionState()
-	if len(state.PeerCertificates) == 0 {
+	facts, ok := check.TLSFactsFrom(state.PeerCertificates, state.Version, state.CipherSuite, host)
+	if !ok {
 		return failed("Could not retrieve SSL certificate")
 	}
-	leaf := state.PeerCertificates[0]
-
-	issuer := "Unknown"
-	if len(leaf.Issuer.Organization) > 0 && leaf.Issuer.Organization[0] != "" {
-		issuer = leaf.Issuer.Organization[0]
-	} else if leaf.Issuer.CommonName != "" {
-		issuer = leaf.Issuer.CommonName
-	}
-	subject := leaf.Subject.CommonName
-	if subject == "" {
-		subject = host
-	}
-
-	f := Facts{
-		NotBefore: str(leaf.NotBefore.UTC().Format(iso8601)),
-		NotAfter:  str(leaf.NotAfter.UTC().Format(iso8601)),
-		Issuer:    str(issuer),
-		Subject:   str(subject),
-	}
-	if name := protocolName(state.Version); name != "" {
-		f.TLSProtocol = str(name)
-	}
-	cipher := tls.CipherSuiteName(state.CipherSuite)
-	f.TLSCipher = str(cipher)
-	if bits := cipherBits(cipher); bits > 0 {
-		f.TLSCipherBits = &bits
-	}
-	return f
-}
-
-// protocolName is the name PHP's stream crypto metadata reports.
-func protocolName(v uint16) string {
-	switch v {
-	case tls.VersionTLS13:
-		return "TLSv1.3"
-	case tls.VersionTLS12:
-		return "TLSv1.2"
-	case tls.VersionTLS11:
-		return "TLSv1.1"
-	case tls.VersionTLS10:
-		return "TLSv1"
-	}
-	return ""
-}
-
-// cipherBits is the symmetric key size the suite name states, as OpenSSL
-// reports it to PHP.
-func cipherBits(name string) int {
-	switch {
-	case strings.Contains(name, "_256_"), strings.Contains(name, "CHACHA20"):
-		return 256
-	case strings.Contains(name, "_128_"):
-		return 128
-	case strings.Contains(name, "3DES"):
-		return 168
-	}
-	return 0
+	return Facts{TLSFacts: facts}
 }
