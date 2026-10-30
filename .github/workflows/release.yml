@@ -13,9 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Newest 1.26 patch at build time, never the floor go.mod names: the
+      # 1.5.5 release was built with go1.26.0 in late October and shipped
+      # without eight months of crypto/tls, net/http and x509 fixes.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.26.x'
+          check-latest: true
       - run: go vet ./... && go test ./...
       - name: build
         run: |
