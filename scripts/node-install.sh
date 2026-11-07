@@ -56,6 +56,14 @@ fi
 if [ -f /etc/sentinel-probe/token ]; then
   chmod 0640 /etc/sentinel-probe/token; chgrp probe /etc/sentinel-probe/token
 fi
+# Keys only over SSH. Vultr and Linode images ship with root password
+# logins on, and bots were guessing root passwords on Seoul within days
+# (2026-11-07). Skipped when the installing user has no authorized key, so
+# this can never lock the operator out.
+if [ -s "$HOME/.ssh/authorized_keys" ]; then
+  printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' > /etc/ssh/sshd_config.d/00-keys-only.conf
+  sshd -t && systemctl reload ssh
+fi
 systemctl daemon-reload
 # The updater only acts on a version the control plane pins for this region.
 systemctl enable --now sentinel-probe-update.timer >/dev/null 2>&1 || true
