@@ -28,6 +28,7 @@ type fakeControl struct {
 	etags     []string
 	down      atomic.Bool  // results answer 503 with nothing accepted
 	maxBody   atomic.Int64 // when set, a results body over this many bytes answers 413 like nginx
+	slowBody  atomic.Int64 // when set, a results body over this many bytes hangs until the client gives up
 	srv       *httptest.Server
 	manifest  func() map[string]any
 	tag       string // the ETag the fake currently serves; a sync carrying it is a 304
@@ -106,6 +107,10 @@ func newFakeControl(t *testing.T, target string) *fakeControl {
 		if limit := f.maxBody.Load(); limit > 0 && int64(len(b)) > limit {
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			w.Write([]byte("<html><head><title>413 Request Entity Too Large</title></head></html>"))
+			return
+		}
+		if limit := f.slowBody.Load(); limit > 0 && int64(len(b)) > limit {
+			<-r.Context().Done()
 			return
 		}
 		json.Unmarshal(b, &body)
@@ -574,6 +579,67 @@ func TestTooLargeBatchShrinksAndOversizedResultIsDropped(t *testing.T) {
 	}
 	if f.postedCount() != 4 {
 		t.Fatalf("the dropped result must not have been accepted, posted %d", f.postedCount())
+	}
+}
+
+func TestTimedOutBatchShrinksUntilItGetsThrough(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }))
+	defer target.Close()
+	f := newFakeControl(t, target.URL)
+	dir := t.TempDir()
+	r := newTestRunner(t, f, dir)
+	r.postTimeout = 200 * time.Millisecond
+
+	// Eight results; a body holding more than two never finishes in time,
+	// like a full batch over a congested long-haul path.
+	for i := 0; i < 8; i++ {
+		if err := r.spool.Add(42, time.Now(), map[string]any{"status": "online", "response_time": 100 + i, "status_code": 200, "error": nil}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	two := len(f.encodedBatch(r.spool.Take(2)))
+	f.slowBody.Store(int64(two))
+
+	if !r.post(context.Background()) {
+		t.Fatal("post reported failure")
+	}
+	if f.postedCount() != 8 {
+		t.Fatalf("expected all 8 results posted in smaller batches, got %d", f.postedCount())
+	}
+	if r.spool.Len() != 0 {
+		t.Fatalf("spool should be empty, has %d", r.spool.Len())
+	}
+
+	// Once the path recovers the batch grows back toward its full size.
+	f.slowBody.Store(0)
+	before := r.postLimit
+	if err := r.spool.Add(42, time.Now(), map[string]any{"status": "online", "response_time": 9, "status_code": 200, "error": nil}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.post(context.Background()) {
+		t.Fatal("post reported failure")
+	}
+	if r.postLimit <= before {
+		t.Fatalf("post limit should grow back after a success, was %d, is %d", before, r.postLimit)
+	}
+}
+
+func TestTimedOutSingleResultLeavesItSpooled(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }))
+	defer target.Close()
+	f := newFakeControl(t, target.URL)
+	r := newTestRunner(t, f, t.TempDir())
+	r.postTimeout = 200 * time.Millisecond
+	f.slowBody.Store(1) // nothing gets through
+
+	if err := r.spool.Add(42, time.Now(), map[string]any{"status": "online", "response_time": 1, "status_code": 200, "error": nil}); err != nil {
+		t.Fatal(err)
+	}
+	if r.post(context.Background()) {
+		t.Fatal("post should report failure so the poster backs off")
+	}
+	if r.spool.Len() != 1 {
+		t.Fatalf("a timed-out result must stay spooled, spool has %d", r.spool.Len())
 	}
 }
 

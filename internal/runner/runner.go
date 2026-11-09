@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"runtime"
 	"strconv"
@@ -60,13 +61,15 @@ type Runner struct {
 	cfg    Config
 	client *control.Client
 	// postLimit is how many results the next post carries: BatchSize until
-	// the control plane answers 413, then halved down to one, and doubled
-	// back up as posts succeed.
+	// the control plane answers 413 or a post times out, then halved down to
+	// one, and doubled back up as posts succeed.
 	postLimit int
-	trimmed   bool // the last batch was cut by the size cap, so the spool may still hold more
-	store     *manifest.Store
-	spool     *spool.Spool
-	log       *slog.Logger
+	// postTimeout bounds one results post (55 s; tests shorten it).
+	postTimeout time.Duration
+	trimmed     bool // the last batch was cut by the size cap, so the spool may still hold more
+	store       *manifest.Store
+	spool       *spool.Spool
+	log         *slog.Logger
 
 	mu       sync.Mutex
 	manifest *manifest.Manifest
@@ -124,6 +127,7 @@ func New(cfg Config, client *control.Client) (*Runner, error) {
 		vitals:     sysinfo.NewSampler(cfg.DataDir),
 	}
 	r.postLimit = cfg.BatchSize
+	r.postTimeout = 55 * time.Second
 	if m, err := r.store.Load(); err != nil {
 		r.log.Warn("cached manifest unreadable", "error", err)
 	} else if m != nil {
@@ -668,7 +672,7 @@ func (r *Runner) post(ctx context.Context) bool {
 				break
 			}
 		}
-		pctx, cancel := context.WithTimeout(ctx, 55*time.Second)
+		pctx, cancel := context.WithTimeout(ctx, r.postTimeout)
 		ack, err := r.client.PostResults(pctx, items)
 		cancel()
 		if ack != nil {
@@ -704,6 +708,17 @@ func (r *Runner) post(ctx context.Context) bool {
 				r.log.Error("result too large for the control plane; dropped", "monitor_id", items[0].MonitorID, "bytes", len(items[0].Result), "checked_at", items[0].CheckedAt)
 				continue
 			}
+			if isTimeout(err) && ctx.Err() == nil && len(items) > 1 {
+				// A slow or lossy path (a congested long-haul route into the
+				// control plane's edge) cannot carry a full batch inside the
+				// deadline, and retrying the same batch never gets through
+				// while the spool grows behind it. Post fewer at a time, at
+				// once: a smaller body is the retry, and postLimit doubles
+				// back up as posts succeed.
+				r.postLimit = max(1, len(items)/2)
+				r.log.Warn("posting results timed out; posting fewer at a time", "was", len(items), "now", r.postLimit, "pending", r.spool.Len())
+				continue
+			}
 			if errors.Is(err, control.ErrStorageUnavailable) {
 				r.log.Warn("control plane storage unavailable; results stay spooled", "pending", r.spool.Len())
 			} else {
@@ -720,6 +735,16 @@ func (r *Runner) post(ctx context.Context) bool {
 			return true
 		}
 	}
+}
+
+// isTimeout reports whether a post failed by running out of time, either
+// the post's own deadline or the HTTP client's timeout.
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // ---- status, as reported on every sync
