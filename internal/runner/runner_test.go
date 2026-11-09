@@ -610,17 +610,29 @@ func TestTimedOutBatchShrinksUntilItGetsThrough(t *testing.T) {
 		t.Fatalf("spool should be empty, has %d", r.spool.Len())
 	}
 
-	// Once the path recovers the batch grows back toward its full size.
+	// Once the path recovers the batch grows back toward its full size, but
+	// only every growEvery successful posts: a size the path just choked on
+	// is not retried within seconds.
 	f.slowBody.Store(0)
 	before := r.postLimit
-	if err := r.spool.Add(42, time.Now(), map[string]any{"status": "online", "response_time": 9, "status_code": 200, "error": nil}); err != nil {
-		t.Fatal(err)
+	postOne := func() {
+		t.Helper()
+		if err := r.spool.Add(42, time.Now(), map[string]any{"status": "online", "response_time": 9, "status_code": 200, "error": nil}); err != nil {
+			t.Fatal(err)
+		}
+		if !r.post(context.Background()) {
+			t.Fatal("post reported failure")
+		}
 	}
-	if !r.post(context.Background()) {
-		t.Fatal("post reported failure")
+	for i := 0; i < growEvery-1; i++ {
+		postOne()
 	}
-	if r.postLimit <= before {
-		t.Fatalf("post limit should grow back after a success, was %d, is %d", before, r.postLimit)
+	if r.postLimit != before {
+		t.Fatalf("post limit should hold for %d posts after a timeout, was %d, is %d", growEvery-1, before, r.postLimit)
+	}
+	postOne()
+	if r.postLimit != min(r.cfg.BatchSize, before*2) {
+		t.Fatalf("post limit should double on post %d, was %d, is %d", growEvery, before, r.postLimit)
 	}
 }
 

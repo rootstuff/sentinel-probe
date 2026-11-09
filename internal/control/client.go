@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -24,9 +25,25 @@ type Client struct {
 	UserAgent string
 	HTTP      *http.Client
 
-	// mu guards HTTP, which do replaces after a transport failure.
+	// mu guards HTTP, which do replaces after a transport failure, and the
+	// ingest fields below.
 	mu sync.Mutex
+
+	// ingestURL is where results are posted when the control plane names
+	// one on sync (a DNS-only hostname on the origin, so a Cloudflare
+	// problem cannot stall uploads, as it did for over an hour on
+	// 2026-11-09). Empty: results go to BaseURL. A post that cannot reach
+	// it parks it until ingestDownUntil and results go to BaseURL meanwhile.
+	ingestURL       string
+	ingestDownUntil time.Time
 }
+
+// IngestURLHeader is the sync response header naming the ingest URL.
+const IngestURLHeader = "X-Sentinel-Ingest-Url"
+
+// ingestCooldown is how long results go through BaseURL after a post to the
+// ingest URL fails before it is tried again.
+const ingestCooldown = 5 * time.Minute
 
 // Health checks on the one HTTP/2 connection every control-plane request
 // shares. Go sends no pings by default, so a connection the network dropped
@@ -111,6 +128,9 @@ func (c *Client) Sync(ctx context.Context, etag, version string, status any) (*m
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		c.setIngestURL(resp.Header.Get(IngestURLHeader))
+	}
 
 	switch resp.StatusCode {
 	case http.StatusNotModified:
@@ -160,15 +180,25 @@ func (c *Client) PostResults(ctx context.Context, items []spool.Item) (*Ack, err
 		results[i] = wire{it.MonitorID, it.Type, it.CheckedAt.UTC().Format(time.RFC3339), it.Result}
 	}
 	body, _ := json.Marshal(map[string]any{"results": results})
-	req, err := c.request(ctx, "/api/probe/results", body)
+	base, direct := c.resultsBase(time.Now())
+	req, err := c.requestTo(ctx, base, "/api/probe/results", body)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := c.do(req)
 	if err != nil {
+		if direct {
+			c.parkIngest(time.Now())
+			return nil, fmt.Errorf("ingest %s: %w", base, err)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if direct && !ingestAnswered(resp.StatusCode) {
+		// Not the control plane answering (a wrong vhost, a dead box after
+		// a failover): park the ingest URL and post through BaseURL.
+		c.parkIngest(time.Now())
+	}
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusServiceUnavailable:
@@ -189,8 +219,72 @@ func (c *Client) PostResults(ctx context.Context, items []spool.Item) (*Ack, err
 	}
 }
 
+// ResultsVia reports where the next results post goes: "ingest" for the
+// ingest URL, "fallback" while it is parked after a failure, or "base"
+// when the control plane named none.
+func (c *Client) ResultsVia() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.ingestURL == "":
+		return "base"
+	case time.Now().Before(c.ingestDownUntil):
+		return "fallback"
+	default:
+		return "ingest"
+	}
+}
+
+// setIngestURL records the ingest URL the control plane named on sync. Only
+// an https URL with a host is taken; anything else (or nothing) clears it.
+// A changed URL is tried at once, even if the old one was parked.
+func (c *Client) setIngestURL(raw string) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if u, err := url.Parse(raw); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		raw = ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if raw != c.ingestURL {
+		c.ingestURL = raw
+		c.ingestDownUntil = time.Time{}
+	}
+}
+
+// resultsBase is the base URL for the next results post and whether it is
+// the ingest URL.
+func (c *Client) resultsBase(now time.Time) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ingestURL != "" && !now.Before(c.ingestDownUntil) {
+		return c.ingestURL, true
+	}
+	return c.BaseURL, false
+}
+
+func (c *Client) parkIngest(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ingestDownUntil = now.Add(ingestCooldown)
+}
+
+// ingestAnswered reports whether a status came from the control plane's
+// results endpoint (as opposed to something in front of a box that is not
+// serving it).
+func ingestAnswered(status int) bool {
+	switch status {
+	case http.StatusOK, http.StatusServiceUnavailable, http.StatusUnauthorized, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
+
 func (c *Client) request(ctx context.Context, path string, body []byte) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(body))
+	return c.requestTo(ctx, c.BaseURL, path, body)
+}
+
+func (c *Client) requestTo(ctx context.Context, base, path string, body []byte) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

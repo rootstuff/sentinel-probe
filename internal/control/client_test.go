@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rootstuff/sentinel-probe/internal/spool"
 )
 
 // The shared HTTP/2 connection is health-checked: a dead one is pinged and
@@ -95,4 +97,129 @@ func mustRequest(t *testing.T, c *Client, path string) *http.Request {
 		t.Fatal(err)
 	}
 	return req
+}
+
+// fakePlane answers sync with an ingest header and records which server got
+// each results post.
+func fakePlane(t *testing.T, ingest string, hits *[]string, name string, status int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/probe/sync":
+			if ingest != "" {
+				w.Header().Set(IngestURLHeader, ingest)
+			}
+			w.WriteHeader(http.StatusNotModified)
+		case "/api/probe/results":
+			*hits = append(*hits, name)
+			w.WriteHeader(status)
+			if status == http.StatusOK {
+				w.Write([]byte(`{"accepted":[0],"skipped":[],"failed":[]}`))
+			}
+		}
+	}))
+}
+
+func oneItem() []spool.Item {
+	return []spool.Item{{Seq: 1, MonitorID: 42, CheckedAt: time.Now(), Result: []byte(`{"status":"online"}`)}}
+}
+
+func TestResultsGoToTheIngestURLTheSyncNamed(t *testing.T) {
+	var hits []string
+	ingest := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, "ingest")
+		w.Write([]byte(`{"accepted":[0],"skipped":[],"failed":[]}`))
+	}))
+	defer ingest.Close()
+	base := fakePlane(t, ingest.URL+"/", &hits, "base", http.StatusOK)
+	defer base.Close()
+
+	c := New(base.URL, "spn_test", "test")
+	c.HTTP = ingest.Client() // trusts the test server's certificate; plain http still works
+	if _, err := c.Sync(context.Background(), "", "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.ResultsVia(); got != "ingest" {
+		t.Fatalf("results should go to the ingest URL, via %q", got)
+	}
+	if _, err := c.PostResults(context.Background(), oneItem()); err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0] != "ingest" {
+		t.Fatalf("expected one post to the ingest URL, got %v", hits)
+	}
+}
+
+func TestUnreachableIngestFallsBackToTheBaseURL(t *testing.T) {
+	var hits []string
+	dead := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close() // nothing listens there now
+
+	base := fakePlane(t, deadURL, &hits, "base", http.StatusOK)
+	defer base.Close()
+	c := New(base.URL, "spn_test", "test")
+	if _, err := c.Sync(context.Background(), "", "test", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.PostResults(context.Background(), oneItem()); err == nil {
+		t.Fatal("the post to a dead ingest URL should fail")
+	}
+	if got := c.ResultsVia(); got != "fallback" {
+		t.Fatalf("a failed ingest post should park it, via %q", got)
+	}
+	if _, err := c.PostResults(context.Background(), oneItem()); err != nil {
+		t.Fatalf("the next post should go through the base URL: %v", err)
+	}
+	if len(hits) != 1 || hits[0] != "base" {
+		t.Fatalf("expected the retry on the base URL, got %v", hits)
+	}
+
+	// The cooldown passes and the ingest URL is tried again.
+	c.mu.Lock()
+	c.ingestDownUntil = time.Now().Add(-time.Second)
+	c.mu.Unlock()
+	if got := c.ResultsVia(); got != "ingest" {
+		t.Fatalf("after the cooldown the ingest URL should be tried again, via %q", got)
+	}
+}
+
+func TestIngestAnsweringSomethingElseIsParked(t *testing.T) {
+	var hits []string
+	wrong := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // a vhost that does not serve the probe API
+	}))
+	defer wrong.Close()
+	base := fakePlane(t, wrong.URL, &hits, "base", http.StatusOK)
+	defer base.Close()
+	c := New(base.URL, "spn_test", "test")
+	c.HTTP = wrong.Client()
+	if _, err := c.Sync(context.Background(), "", "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.PostResults(context.Background(), oneItem()); err == nil {
+		t.Fatal("a 404 from the ingest URL should fail the post")
+	}
+	if got := c.ResultsVia(); got != "fallback" {
+		t.Fatalf("a 404 should park the ingest URL, via %q", got)
+	}
+}
+
+func TestOnlyAnHTTPSIngestURLIsTaken(t *testing.T) {
+	c := New("https://control.example", "spn_test", "test")
+	for _, raw := range []string{"", "http://ingest.example", "not a url", "https://", "https://user:pw@ingest.example"} {
+		c.setIngestURL(raw)
+		if got := c.ResultsVia(); got != "base" {
+			t.Errorf("%q should not be taken, via %q", raw, got)
+		}
+	}
+	c.setIngestURL("https://ingest.example/")
+	if base, direct := c.resultsBase(time.Now()); !direct || base != "https://ingest.example" {
+		t.Fatalf("an https URL should be taken without its trailing slash, got %q %v", base, direct)
+	}
+	c.setIngestURL("")
+	if got := c.ResultsVia(); got != "base" {
+		t.Fatalf("a sync without the header should clear it, via %q", got)
+	}
 }

@@ -64,6 +64,12 @@ type Runner struct {
 	// the control plane answers 413 or a post times out, then halved down to
 	// one, and doubled back up as posts succeed.
 	postLimit int
+	// slowGrow is set after a post timed out: the limit then doubles only
+	// every growEvery successful posts, not after each one, so a batch size
+	// the path just choked on is not retried within seconds (1.5.7 went
+	// 12 -> 100 in four posts on 2026-11-09 and timed out again at 100).
+	slowGrow   bool
+	growStreak int
 	// postTimeout bounds one results post (55 s; tests shorten it).
 	postTimeout time.Duration
 	trimmed     bool // the last batch was cut by the size cap, so the spool may still hold more
@@ -716,6 +722,7 @@ func (r *Runner) post(ctx context.Context) bool {
 				// once: a smaller body is the retry, and postLimit doubles
 				// back up as posts succeed.
 				r.postLimit = max(1, len(items)/2)
+				r.slowGrow, r.growStreak = true, 0
 				r.log.Warn("posting results timed out; posting fewer at a time", "was", len(items), "now", r.postLimit, "pending", r.spool.Len())
 				continue
 			}
@@ -726,14 +733,37 @@ func (r *Runner) post(ctx context.Context) bool {
 			}
 			return false
 		}
-		if r.postLimit < r.cfg.BatchSize {
-			r.postLimit = min(r.cfg.BatchSize, r.postLimit*2)
-		}
+		r.growPostLimit()
 		// Fewer than asked for means the spool is drained; a size-trimmed
 		// batch is not, so compare against what was asked for, not sent.
 		if len(items) < limit && !r.trimmed {
 			return true
 		}
+	}
+}
+
+// growEvery is how many successful posts it takes to double the batch size
+// again after a timeout.
+const growEvery = 4
+
+// growPostLimit doubles the batch size back toward BatchSize after a
+// successful post: at once after a 413, every growEvery posts after a
+// timeout.
+func (r *Runner) growPostLimit() {
+	if r.postLimit >= r.cfg.BatchSize {
+		r.slowGrow, r.growStreak = false, 0
+		return
+	}
+	if r.slowGrow {
+		r.growStreak++
+		if r.growStreak < growEvery {
+			return
+		}
+		r.growStreak = 0
+	}
+	r.postLimit = min(r.cfg.BatchSize, r.postLimit*2)
+	if r.postLimit >= r.cfg.BatchSize {
+		r.slowGrow = false
 	}
 }
 
@@ -778,6 +808,7 @@ func (r *Runner) status() map[string]any {
 		"manifest_age_seconds": age,
 		"last_sync_ago":        syncedAgo,
 		"sync_error":           r.syncErr,
+		"results_via":          r.client.ResultsVia(),
 		"concurrency":          r.cfg.Concurrency,
 		"rss_mb":               rss / (1 << 20),
 		"heap_mb":              int64(ms.HeapAlloc) / (1 << 20),
